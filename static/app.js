@@ -13,9 +13,11 @@ const icons = {
 };
 const icon = name => `<svg viewBox="0 0 24 24" aria-hidden="true">${icons[name] || icons.note}</svg>`;
 const labels = {home:'工作台',projects:'项目',finance:'财务',tasks:'待办',activity:'操作记录',users:'团队账号'};
-const kindLabels = {subsections:'分区',projects:'项目',transactions:'财务记录',tasks:'待办',notes:'沟通笔记',files:'附件',user:'账号'};
+const kindLabels = {finance_profiles:'财务账本',subsections:'分区',projects:'项目',transactions:'财务记录',tasks:'待办',notes:'沟通笔记',files:'附件',user:'账号'};
 let me, records = [], people = [], config = {}, events = [], view = 'home', projectId = null, projectTab = 'notes', search = '', filter = '', taskFilter = '未完成';
 let refreshTimer, toastTimer, lastSnapshot, subsectionId = '';
+let financeProfileId = '', reimbursementFilter = '';
+const financeProfileName = id => find(id)?.title || '默认账本';
 const sectionName = id => find(id)?.title || '未分区';
 const inSection = r => !subsectionId || (subsectionId==='unassigned' ? !r.subsection_id : r.subsection_id===subsectionId);
 const byKind = kind => records.filter(r => r.kind === kind);
@@ -114,13 +116,56 @@ function projectPage() {
 }
 function noteCard(n) {return `<article class="note"><div class="spread"><h3>${esc(n.title)}</h3><button class="text-button" data-edit="${n.id}">编辑</button></div><p class="meta">${esc(sectionName(n.subsection_id))} · ${esc(n.date)}${n.contact?' · 与 '+esc(n.contact)+' 沟通':''}</p><div class="note-body">${esc(n.body)}</div>${n.linked_task_id&&find(n.linked_task_id)?`<div class="linked-task"><button class="text-button" data-edit="${n.linked_task_id}">${icon('tasks')} ${esc(find(n.linked_task_id).title)}</button>${badge(find(n.linked_task_id).status)}</div>`:''}<p class="meta">${esc(person(n.updated_by))} · ${formatTime(n.updated_at)} <button class="text-button" data-history="${n.id}">修改记录</button></p></article>`;}
 function fileRow(f) {return `<div class="row">${icon('file')}<div class="row-main"><h3><a href="${esc(f.url)}" target="_blank" rel="noopener">${esc(f.title)}</a></h3><p>${esc(sectionName(f.subsection_id))} · ${esc(person(f.created_by))} · ${formatTime(f.created_at)}</p></div><button class="text-button" data-edit="${f.id}">编辑</button></div>`;}
-function transactionRow(t) {return `<button class="row clickable" data-edit="${t.id}"><div class="row-main"><h3>${esc(t.title)}</h3><p>${esc(t.date)} · ${esc(t.event||projectName(t.project_id))}</p><p>${esc(t.responsible||person(t.created_by))} · ${esc(t.payment_status)}</p></div><div class="amount ${t.direction==='收入'?'income':'expense'}">${t.direction==='收入'?'+':'−'}${cash(t.amount,t.currency)}<small>${t.currency==='CNY'?(t.usd_amount?'折合 '+cash(t.usd_amount):'待确认美元金额'):esc(t.posting_status)}</small></div></button>`;}
+function transactionRow(t) {return `<button class="row clickable" data-edit="${t.id}"><div class="row-main"><h3>${esc(t.title)}</h3><p>${esc(t.date)} · ${esc(t.event||projectName(t.project_id))}</p><p>${esc(t.responsible||person(t.created_by))} · ${esc(t.payment_status)} · ${esc(financeProfileName(t.profile_id))}</p>${reimbursementBadge(t)}</div><div class="amount ${t.direction==='收入'?'income':'expense'}">${t.direction==='收入'?'+':'−'}${cash(t.amount,t.currency)}<small>${t.currency==='CNY'?(t.usd_amount?'折合 '+cash(t.usd_amount):'待确认美元金额'):esc(t.posting_status)}</small></div></button>`;}
 function financePage() {
  if(!config.finance_access)return empty('暂无财务权限','请联系管理员。');
- const all=byKind('transactions'), items=all.filter(t=>(!filter||t.direction===filter||t.payment_status===filter)&&JSON.stringify(t).toLowerCase().includes(search.toLowerCase())).sort((a,b)=>b.date.localeCompare(a.date));
- const total=direction=>items.filter(t=>t.direction===direction&&t.usd_amount!==null).reduce((sum,t)=>sum+Math.round(Number(t.usd_amount)*100),0)/100;
- const income=total('收入'),expense=total('支出'),missing=items.filter(t=>t.usd_amount===null).length;
- return `<div class="finance-summary"><div><span>收入 · USD</span><strong class="income">${cash(income)}</strong></div><div><span>支出 · USD</span><strong>${cash(expense)}</strong></div><div><span>收支净额 · USD</span><strong>${cash(income-expense)}</strong></div></div><p class="hint">汇总当前筛选的已录入流水，包含未付记录；不代表银行余额。${missing?` ${missing} 笔缺少美元折算金额，尚未计入。`:''}</p>${searchBar(['收入','支出','已付','未付','部分支付'],'搜索事项、负责人或备注')}<div class="section-title"><h2>收支流水 <span class="meta">${items.length} 笔</span></h2><a class="text-button" href="${esc(config.sheet_url)}" target="_blank" rel="noopener">原始表格</a></div><div class="panel">${items.length?items.map(transactionRow).join(''):empty(all.length?'没有匹配的流水':'开始记录第一笔收支','支持美元、人民币、支付状态与入账情况。原表历史数据尚未导入。','new-transaction','记录收支','finance')}</div>`;
+ const {rows,totals,balances}=CmpFinance.ledger(records,financeProfileId,search,filter,reimbursementFilter);
+ const profile=find(financeProfileId);
+ return `<div class="finance-profile-bar">${financeProfileSelect(financeProfileId,'finance_profile','财务 Profile / 账本')}<button class="secondary" data-new="finance_profiles">${icon('plus')} 新建账本</button>${profile?`<button class="text-button" data-edit="${profile.id}">编辑账本</button>`:''}</div>${profile?.description?`<p class="finance-profile-description">${esc(profile.description)}</p>`:''}
+ ${rows.length?`<div class="ledger-summary">${Object.entries(totals).map(([currency,t])=>`<div class="ledger-currency"><span class="currency-code">${currency}</span><div><small>收入</small><strong class="income">${cash(t.income/100,currency)}</strong></div><div><small>支出</small><strong>${cash(t.expense/100,currency)}</strong></div><div><small>收支净额</small><strong>${cash((t.income-t.expense)/100,currency)}</strong></div><div><small>待报销余额</small><strong>${cash(t.pending/100,currency)}</strong>${t.unknown?`<small>${t.unknown} 笔报销待确认</small>`:''}</div></div>`).join('')}</div>`:''}
+ <p class="hint">各币种分别汇总当前筛选，含未付流水；收支净额不代表银行余额。报销只更新原支出，不重复计入收支。待确认记录不计入待报销余额。</p>
+ <div class="finance-filters"><input id="search" type="search" placeholder="搜索事项、负责人或备注" aria-label="搜索事项、负责人或备注" value="${esc(search)}"><select id="filter" aria-label="筛选收支与支付"><option value="">全部收支与支付</option>${['收入','支出','已付','未付','部分支付'].map(x=>`<option ${filter===x?'selected':''}>${x}</option>`).join('')}</select><select id="reimbursement-filter" aria-label="筛选报销状态"><option value="">全部报销状态</option>${CmpFinance.statuses.map(x=>`<option ${reimbursementFilter===x?'selected':''}>${x}</option>`).join('')}</select></div>
+ <div class="section-title"><h2>收支明细 <span class="meta">${rows.length} 笔</span></h2><a class="text-button" href="${esc(config.sheet_url)}" target="_blank" rel="noopener">原始表格</a></div>
+ ${rows.length?`<p class="hint">按日期排列，可横向滚动查看全部列；点击事项编辑，点击报销状态更新报销。</p><div class="ledger-scroll" tabindex="0" role="region" aria-label="收支与报销明细表"><table class="ledger-table"><thead><tr>${['事项 / 项目','日期','事件 / 活动','负责人 / 垫付人','币种','收入','支出','筛选内累计','支付状态','付款形式','报销状态','应报金额','已报金额','待报金额','报销日期','入账状态','入账金额','折合美元','备注','报销备注','最近更新','历史'].map(x=>`<th scope="col">${x}</th>`).join('')}</tr></thead><tbody>${rows.map(t=>financeTableRow(t,balances[t.id])).join('')}</tbody></table></div>`:`<div class="panel">${empty(search||filter||reimbursementFilter?'没有匹配的流水':'这个账本还没有记录','可以记录收支，并单独跟进每笔支出的报销情况。','new-transaction','记录收支','finance')}</div>`}`;
+}
+function financeProfileSelect(value,name='profile_id',label='所属财务账本') {
+ return select(name,label,[['','默认账本'],...byKind('finance_profiles').slice().sort((a,b)=>a.created_at.localeCompare(b.created_at)||a.id.localeCompare(b.id)).map(p=>[p.id,p.title])],value);
+}
+function reimbursementBadge(t) {
+ const status=CmpFinance.status(t);
+ return `<span class="reimbursement-badge ${['待报销','部分报销'].includes(status)?'pending':status==='已报销'?'done':''}">${status}</span>`;
+}
+function financeTableRow(t,balance) {
+ const status=CmpFinance.status(t), applies=['待报销','部分报销','已报销'].includes(status);
+ const amount=v=>v===null||v===undefined||v===''?'—':cash(v,t.currency);
+ return `<tr><td><button class="text-button" data-edit="${t.id}">${esc(t.title)}</button>${t.project_id?`<small>${esc(projectName(t.project_id))}</small>`:''}</td><td>${esc(t.date)}</td><td>${esc(t.event)||'—'}</td><td>${esc(t.responsible)||'—'}</td><td>${esc(t.currency)}</td><td class="numeric income">${t.direction==='收入'?amount(t.amount):'—'}</td><td class="numeric">${t.direction==='支出'?amount(t.amount):'—'}</td><td class="numeric">${cash(balance/100,t.currency)}</td><td>${esc(t.payment_status)}</td><td>${esc(t.payment_method)||'—'}</td><td>${t.direction==='支出'?`<button data-reimburse="${t.id}" aria-label="更新报销：${esc(t.title)}">${reimbursementBadge(t)}</button>`:reimbursementBadge(t)}</td><td class="numeric">${applies?amount(t.claim_amount):'—'}</td><td class="numeric">${applies?amount(t.reimbursed_amount||0):'—'}</td><td class="numeric">${applies?cash((CmpFinance.cents(t.claim_amount)-CmpFinance.cents(t.reimbursed_amount))/100,t.currency):'—'}</td><td>${esc(t.reimbursement_date)||'—'}</td><td>${esc(t.posting_status)}</td><td class="numeric">${amount(t.booked_amount)}</td><td class="numeric">${t.usd_amount==null?'—':cash(t.usd_amount)}</td><td class="ledger-note">${esc(t.note)||'—'}</td><td class="ledger-note">${esc(t.reimbursement_note)||'—'}</td><td>${esc(person(t.updated_by))}<br>${formatTime(t.updated_at)}</td><td><button class="text-button" data-history="${t.id}">修改记录</button></td></tr>`;
+}
+function reimbursementFields(data) {
+ return `<fieldset class="reimbursement-fields wide"><legend>报销跟进</legend><div class="reimbursement-grid">${select('reimbursement_status','报销状态',CmpFinance.statuses,CmpFinance.status(data))}${field('claim_amount','应报金额（原币）',data.claim_amount,'number','min="0" step="0.01"')}${field('reimbursed_amount','累计已报金额（原币）',data.reimbursed_amount,'number','min="0" step="0.01"')}${field('reimbursement_date','最近报销日期',data.reimbursement_date,'date')}${area('reimbursement_note','报销备注',data.reimbursement_note)}</div><p class="hint">金额与支出使用同一币种。若只垫付了部分费用，应报金额填实际需要报销的部分；已报金额填累计金额。</p></fieldset>`;
+}
+function syncReimbursementFields() {
+ const status=$('#editor [name=reimbursement_status]');if(!status)return;
+ const direction=$('#editor [name=direction]');
+ const income=direction?.value==='收入';
+ if(income)status.value='不需报销';
+ status.disabled=income;
+ const applies=['待报销','部分报销','已报销'].includes(status.value);
+ for(const name of ['claim_amount','reimbursed_amount','reimbursement_date']) {
+   const input=$('#editor [name='+name+']');input.disabled=!applies;
+   input.required=applies && name!=='reimbursement_date';
+ }
+}
+function reimbursementBody(form) {
+ const body=Object.fromEntries(form);
+ body.reimbursement_status=body.direction==='收入'?'不需报销':body.reimbursement_status;
+ if(['待确认','不需报销'].includes(body.reimbursement_status)) Object.assign(body,{claim_amount:null,reimbursed_amount:null,reimbursement_date:''});
+ return body;
+}
+function reimbursementEditor(id) {
+ const t=find(id);
+ openModal('更新报销',`<p>${esc(t.title)} · ${cash(t.amount,t.currency)}</p><p class="hint">${esc(financeProfileName(t.profile_id))} · ${esc(t.responsible||'未填写垫付人')}</p>`+formWrap(reimbursementFields(t),'保存报销'));
+ syncReimbursementFields();
+ bindSubmit(async form=>{await api('/records/transactions/'+id,'PATCH',{...reimbursementBody(form),version:t.version});closeModal();await load();toast('报销记录已更新，更新人：'+me.name);});
 }
 function taskRow(t) {const done=t.status==='已完成', overdue=t.due_date&&t.due_date<today()&&!done;return `<div class="row ${done?'completed':''}"><button class="task-check ${done?'checked':''}" data-toggle-task="${t.id}" aria-label="${done?'重新打开':'完成'}：${esc(t.title)}">${done?icon('check'):''}</button><button class="row-main" data-edit="${t.id}"><h3>${esc(t.title)}</h3><p>${esc(person(t.assignee_id))} · ${esc(projectName(t.project_id))}${t.subsection_id?' / '+esc(sectionName(t.subsection_id)):''}</p><p class="${overdue?'overdue':''}">${t.due_date?esc(t.due_date)+(overdue?' 已逾期':' 截止'):'未设截止日'}</p></button>${badge(t.status)}</div>`;}
 function tasksPage() {const items=byKind('tasks').filter(t=>(taskFilter==='全部'||taskFilter==='我的待办'&&t.assignee_id===me.id&&t.status!=='已完成'||taskFilter==='未完成'&&t.status!=='已完成'||taskFilter==='已完成'&&t.status==='已完成')&&t.title.toLowerCase().includes(search.toLowerCase())).sort((a,b)=>(a.due_date||'9999').localeCompare(b.due_date||'9999'));return `<nav class="detail-tabs" aria-label="待办筛选">${['未完成','我的待办','已完成','全部'].map(f=>`<button data-task-filter="${f}" class="${taskFilter===f?'active':''}">${f}</button>`).join('')}</nav><div class="toolbar"><input type="search" id="search" value="${esc(search)}" placeholder="搜索待办" aria-label="搜索待办"></div><div class="panel">${items.length?items.map(taskRow).join(''):empty('这里没有待办','新增要跟进的事项，或切换上面的筛选查看其他任务。','new-task','添加待办','tasks')}</div>`;}
@@ -162,8 +207,9 @@ function refreshProjectFields() {
 
 function editor(kind,id) {
  if(kind==='users'){userEditor();return;}
- const record=id?find(id):null, data=record||{date:today(),project_id:projectId||'',subsection_id:subsectionId==='unassigned'?'':subsectionId,currency:'USD',direction:'支出'};
+ const record=id?find(id):null, data=record||{date:today(),project_id:projectId||'',subsection_id:subsectionId==='unassigned'?'':subsectionId,profile_id:financeProfileId,currency:'USD',direction:'支出'};
  let content='';
+ if(kind==='finance_profiles')content=field('title','账本名称',data.title,'text','required maxlength="120" placeholder="例如：公司、商会、业务名称"')+area('description','账本说明',data.description);
  if(kind==='subsections')content=field('title','分区名称',data.title,'text','required maxlength="120" placeholder="例如：店家联系、工厂一联系"')+projectSelect(data.project_id,true)+area('description','分区说明',data.description);
  if(kind==='projects') content=field('title','项目名称',data.title,'text','required maxlength="120"')+select('status','状态',['进行中','待启动','暂停','已完成'],data.status||'进行中')+field('due_date','截止日期',data.due_date,'date')+area('description','项目说明',data.description);
  if(kind==='transactions')content=field('title','事项 / 项目名称',data.title,'text','required maxlength="200"')+field('date','日期',data.date,'date','required')+select('direction','收支',['支出','收入'],data.direction)+select('currency','原币币种',['USD','CNY'],data.currency)+field('amount','原币金额',data.amount,'number','min="0" step="0.01" required')+field('usd_amount','折合美元（人民币流水填写）',data.usd_amount,'number','min="0" step="0.01"')+field('event','事件 / 活动',data.event)+projectSelect(data.project_id)+select('payment_status','支付状态',['未付','已付','部分支付'],data.payment_status||'未付')+field('payment_method','付款形式',data.payment_method,'text','placeholder="现金、支票、转账…"')+select('posting_status','入账状态',['未入账','平帐','部分入账'],data.posting_status||'未入账')+field('booked_amount','入账金额（原币）',data.booked_amount,'number','min="0" step="0.01"')+field('responsible','负责人',data.responsible)+field('category','类别',data.category)+area('note','备注',data.note);
@@ -171,20 +217,23 @@ function editor(kind,id) {
  if(kind==='tasks')content=field('title','要做什么',data.title,'text','required maxlength="200"')+select('status','状态',['待办','进行中','已完成'],data.status||'待办')+peopleSelect('assignee_id','负责人',data.assignee_id)+field('due_date','截止日期',data.due_date,'date')+projectSelect(data.project_id)+area('description','补充说明',data.description);
  if(kind==='files')content=field('title','文件名称',data.title,'text','required')+projectSelect(data.project_id,true)+field('url','Google Drive 文件链接',data.url,'url','required placeholder="https://drive.google.com/…"');
  if(['notes','tasks','files','transactions'].includes(kind)) content+=sectionSelect(data.project_id,data.subsection_id);
+ if(kind==='transactions')content=financeProfileSelect(data.profile_id)+content+reimbursementFields(data);
  if(kind==='notes') content+=`<label class="timeline-toggle wide"><input type="checkbox" name="show_on_timeline" ${data.show_on_timeline!==false?'checked':''}><span>加入项目时间线<small>取消后仍会保存在沟通笔记中。</small></span></label>`+noteTaskControls(data);
  if(kind==='tasks'&&id) {const linked=byKind('notes').filter(n=>n.linked_task_id===id);if(linked.length)content+=`<section class="wide"><h3>关联笔记</h3>${linked.map(n=>`<button type="button" class="text-button" data-edit="${n.id}">${icon('note')} ${esc(n.title)}</button>`).join('<br>')}</section>`;}
  const uploads=kind==='files'&&!id?`<div class="notice">${config.drive_upload_ready?'可以直接上传文件到公司 Drive 文件夹。':'直接上传需要管理员配置 Google Drive 授权。可先在公司文件夹上传，再把文件链接填入下面。'} <a href="${esc(config.drive_folder_url)}" target="_blank" rel="noopener">打开文件夹</a></div>${config.drive_upload_ready?'<button class="secondary" data-action="upload-form">从手机 / 电脑上传</button><br><br>':''}`:'';
  openModal((id?'编辑':'新增')+kindLabels[kind],uploads+formWrap(content)+(id?`<p class="hint">创建：${esc(person(record.created_by))} · ${formatTime(record.created_at)}<br>最近修改：${esc(person(record.updated_by))} · ${formatTime(record.updated_at)}<br><button class="text-button" data-history="${id}">查看修改历史</button></p>`:''));
  if(kind==='notes')syncTaskControls();
+ if(kind==='transactions')syncReimbursementFields();
  if(kind==='subsections'&&id)$('#editor [name=project_id]').disabled=true;
- bindSubmit(async form=>{const body=Object.fromEntries(form);if(kind==='notes')body.show_on_timeline=form.has('show_on_timeline');if(kind==='subsections'&&id)body.project_id=record.project_id;if(id)body.version=record.version;await api('/records/'+kind+(id?'/'+id:''),id?'PATCH':'POST',body);closeModal();await load();toast('已保存，更新人：'+me.name);});
+ bindSubmit(async form=>{const body=kind==='transactions'?reimbursementBody(form):Object.fromEntries(form);if(kind==='notes')body.show_on_timeline=form.has('show_on_timeline');if(kind==='subsections'&&id)body.project_id=record.project_id;if(id)body.version=record.version;const saved=await api('/records/'+kind+(id?'/'+id:''),id?'PATCH':'POST',body);if(kind==='finance_profiles'&&!id){financeProfileId=saved.id;search='';filter='';reimbursementFilter='';}closeModal();await load();toast('已保存，更新人：'+me.name);});
 }
 function userEditor(id) {const p=people.find(x=>x.id===id);openModal(id?'重置 '+p.name+' 的密码':'添加团队成员',formWrap((id?'':field('name','姓名','','text','required maxlength="80"')+field('username','登录账号','','text','required pattern="[a-z0-9_.-]{3,40}" autocomplete="off"'))+field('password','初始密码','','password','required minlength="12" maxlength="128" autocomplete="new-password"'),id?'重置密码':'创建账号'));bindSubmit(async form=>{await api('/users'+(id?'/'+id:''),id?'PATCH':'POST',Object.fromEntries(form));closeModal();await load();toast(id?'密码已重置，请将初始密码交给该成员':'账号已创建，请将账号与初始密码交给该成员');});}
 function passwordForm() {openModal('修改密码',formWrap(field('current_password','当前密码','','password','required autocomplete="current-password"')+field('password','新密码（至少 12 位）','','password','required minlength="12" maxlength="128" autocomplete="new-password"')+field('confirm_password','再次输入新密码','','password','required minlength="12" autocomplete="new-password"'),'修改并重新登录'));bindSubmit(async form=>{if(form.get('password')!==form.get('confirm_password'))throw new Error('两次输入的新密码不一致');await api('/password','POST',Object.fromEntries(form));me=null;closeModal();loginPage();toast('密码已更新，请使用新密码登录');});}
 function account() {openModal('账号与设置',`<div class="account"><span class="avatar">${initials(me.name)}</span><div>${esc(me.name)}<small>${esc(me.username)} · ${me.role==='admin'?'管理员':'团队成员'}</small></div></div><div class="panel"><button class="row clickable" data-action="password"><div class="row-main"><h3>修改密码</h3></div>${icon('arrow')}</button><button class="row clickable" data-view="activity"><div class="row-main"><h3>操作记录</h3></div>${icon('arrow')}</button>${me.role==='admin'?'<button class="row clickable" data-view="users"><div class="row-main"><h3>团队账号管理</h3></div>'+icon('arrow')+'</button>':''}<button class="row clickable" data-action="refresh"><div class="row-main"><h3>刷新全部记录</h3></div>${icon('refresh')}</button><button class="row clickable" data-action="logout"><div class="row-main"><h3>退出登录</h3></div>${icon('logout')}</button></div><p class="hint">手机安装：iPhone Safari → 分享 → 添加到主屏幕；Android Chrome → 菜单 → 安装应用。使用时需要网络连接。</p>`);}
 const fieldLabels={subsection_id:'分区',linked_task_id:'关联待办',title:'标题',name:'姓名',date:'日期',event:'事件',amount:'原币金额',usd_amount:'美元折算金额',currency:'币种',direction:'收支',payment_status:'支付状态',posting_status:'入账状态',booked_amount:'入账金额',payment_method:'付款形式',responsible:'负责人',category:'类别',note:'备注',description:'说明',body:'正文',contact:'联系人',status:'状态',progress:'进度',due_date:'截止日',project_id:'项目',owner_id:'负责人',assignee_id:'负责人',username:'账号',role:'角色',active:'启用',must_change:'需改密码',url:'链接'};
-function auditText(data) {if(!data)return '无';return Object.entries(data).filter(([k])=>k!=='id').map(([k,v])=>`${fieldLabels[k]||k}：${k==='project_id'?projectName(v):k==='subsection_id'?sectionName(v):k==='linked_task_id'?(find(v)?.title||'未关联'):['owner_id','assignee_id'].includes(k)?person(v):v??'未填写'}`).join('\n');}
+function auditText(data) {if(!data)return '无';return Object.entries(data).filter(([k])=>k!=='id').map(([k,v])=>`${fieldLabels[k]||k}：${k==='profile_id'?financeProfileName(v):k==='project_id'?projectName(v):k==='subsection_id'?sectionName(v):k==='linked_task_id'?(find(v)?.title||'未关联'):['owner_id','assignee_id'].includes(k)?person(v):v??'未填写'}`).join('\n');}
 fieldLabels.show_on_timeline='加入时间线';
+Object.assign(fieldLabels,{profile_id:'财务账本',reimbursement_status:'报销状态',claim_amount:'应报金额',reimbursed_amount:'累计已报金额',reimbursement_date:'最近报销日期',reimbursement_note:'报销备注'});
 function showAudit(a) {openModal('修改详情',`<p class="meta">${esc(a.actor_name)} · ${formatTime(a.at)} · ${esc(a.action)}</p><div class="audit-columns"><section><h3>修改前</h3><div class="audit-data">${esc(auditText(a.before))}</div></section><section><h3>修改后</h3><div class="audit-data">${esc(auditText(a.after))}</div></section></div>`);}
 async function history(id) {const data=await api('/activity?entity_id='+encodeURIComponent(id));openModal('这条记录的修改历史',activityList(data));$('#modal').querySelectorAll('[data-audit]').forEach(button=>button.addEventListener('click',e=>{e.stopPropagation();showAudit(data.find(a=>a.id===button.dataset.audit));}));}
 function uploadForm() {openModal('上传项目附件',formWrap(projectSelect(projectId||'',true)+sectionSelect(projectId||'',subsectionId==='unassigned'?'':subsectionId)+field('file','文件（最大 20 MB）','','file','required'),'上传到 Google Drive'));bindSubmit(async form=>{if(form.get('file').size>20*1024*1024)throw new Error('文件不能超过 20 MB');await api('/upload','POST',form);closeModal();await load();toast('文件已保存到 Google Drive');});}
@@ -197,6 +246,7 @@ document.addEventListener('click',async e=>{
   if(b.dataset.view){view=b.dataset.view;projectId=null;subsectionId='';search='';filter='';closeModal();draw();window.scrollTo(0,0);}
   else if(b.dataset.new)editor(b.dataset.new);
   else if(b.dataset.edit){const r=find(b.dataset.edit);editor(r.kind,r.id);}
+  else if(b.dataset.reimburse)reimbursementEditor(b.dataset.reimburse);
   else if(b.dataset.project){view='projects';projectId=b.dataset.project;subsectionId='';projectTab='notes';draw();window.scrollTo(0,0);}
   else if(b.hasAttribute('data-section')){subsectionId=b.dataset.section;draw();}
   else if(b.dataset.tab){projectTab=b.dataset.tab;draw();}
@@ -216,7 +266,14 @@ document.addEventListener('click',async e=>{
  }catch(error){toast(error.message);b.disabled=false;}
 });
 document.addEventListener('input',e=>{if(e.target.id==='search'){const pos=e.target.selectionStart;search=e.target.value;$('#page').innerHTML=renderPage();applyTimelineColors();const input=$('#search');input.focus();input.setSelectionRange(pos,pos);}});
-document.addEventListener('change',e=>{if(e.target.name==='task_action')syncTaskControls();if(e.target.name==='project_id')refreshProjectFields();if(e.target.id==='filter'){filter=e.target.value;$('#page').innerHTML=renderPage();applyTimelineColors();}});
+document.addEventListener('change',e=>{
+ if(e.target.name==='task_action')syncTaskControls();
+ if(e.target.name==='project_id')refreshProjectFields();
+ if(['direction','reimbursement_status'].includes(e.target.name))syncReimbursementFields();
+ if(e.target.name==='finance_profile'){financeProfileId=e.target.value;search='';filter='';reimbursementFilter='';draw();}
+ if(e.target.id==='reimbursement-filter'){reimbursementFilter=e.target.value;draw();}
+ if(e.target.id==='filter'){filter=e.target.value;$('#page').innerHTML=renderPage();applyTimelineColors();}
+});
 window.addEventListener('online',()=>{if(me&&!me.must_change)load().catch(e=>toast(e.message));});
 window.addEventListener('offline',()=>toast('当前离线，请联网后保存记录'));
 $('#modal').addEventListener('cancel',()=>{if(me?.must_change){me=null;loginPage();}});

@@ -276,7 +276,9 @@ def date_field(data, key, required=False):
 
 
 def validate(kind, data, c):
-    if kind == 'projects':
+    if kind == 'finance_profiles':
+        out = {'title': text_field(data, 'title', 120, True), 'description': text_field(data, 'description', 2000)}
+    elif kind == 'projects':
         try: progress = int(data.get('progress', 0))
         except (ValueError, TypeError): fail('进度须为 0–100 的整数')
         if not 0 <= progress <= 100: fail('进度须在 0–100 之间')
@@ -287,6 +289,26 @@ def validate(kind, data, c):
         out = {k: text_field(data, k, 2000 if k == 'note' else 150) for k in ['event', 'category', 'payment_method', 'responsible', 'note', 'project_id']}
         out.update(title=text_field(data, 'title', 200, True), date=date_field(data, 'date', True), direction=choice(data, 'direction', ['收入', '支出'], '支出'), currency=choice(data, 'currency', ['USD', 'CNY'], 'USD'), amount=money(data, 'amount', True), usd_amount=money(data, 'usd_amount'), booked_amount=money(data, 'booked_amount'), payment_status=choice(data, 'payment_status', ['已付', '未付', '部分支付'], '未付'), posting_status=choice(data, 'posting_status', ['平帐', '未入账', '部分入账'], '未入账'))
         if out['currency'] == 'USD': out['usd_amount'] = out['amount']
+        out['profile_id'] = text_field(data, 'profile_id', 80)
+        if out['profile_id'] and not c.execute("SELECT id FROM entities WHERE id=? AND kind='finance_profiles'", (out['profile_id'],)).fetchone():
+            fail('财务账本不存在')
+        out['reimbursement_status'] = choice(data, 'reimbursement_status', ['待确认', '不需报销', '待报销', '部分报销', '已报销'], '待确认' if out['direction'] == '支出' else '不需报销')
+        out['claim_amount'] = money(data, 'claim_amount')
+        out['reimbursed_amount'] = money(data, 'reimbursed_amount')
+        out['reimbursement_date'] = date_field(data, 'reimbursement_date')
+        out['reimbursement_note'] = text_field(data, 'reimbursement_note', 2000)
+        status = out['reimbursement_status']
+        claim, paid = Decimal(out['claim_amount'] or '0'), Decimal(out['reimbursed_amount'] or '0')
+        if out['direction'] == '收入' and status != '不需报销': fail('收入不适用报销，请选择不需报销')
+        if status in ('待确认', '不需报销'):
+            if claim or paid or out['reimbursement_date']: fail('请先选择报销状态，再填写报销金额或日期')
+        else:
+            if not 0 < claim <= Decimal(out['amount']): fail('应报金额须大于零且不能超过支出原币金额')
+            if paid > claim: fail('已报金额不能超过应报金额')
+            if status == '待报销' and paid: fail('已有报销金额，请选择部分报销或已报销')
+            if status == '部分报销' and not 0 < paid < claim: fail('部分报销金额须大于零且小于应报金额')
+            if status == '已报销' and paid != claim: fail('已报销金额须等于应报金额')
+            if out['reimbursement_date'] and not paid: fail('尚未报销，不能填写报销日期')
     elif kind == 'notes':
         out = {'title': text_field(data, 'title', 200, True), 'body': text_field(data, 'body', 20000, True), 'contact': text_field(data, 'contact', 150), 'date': date_field(data, 'date', True), 'project_id': text_field(data, 'project_id', 80, True)}
     elif kind == 'tasks':
@@ -361,7 +383,7 @@ def prepare_record(c, kind, body, user):
 def state(request: Request):
     user = current_user(request)
     with db() as c:
-        records = [entity(r) for r in c.execute('SELECT * FROM entities ORDER BY updated_at DESC').fetchall() if r['kind'] != 'transactions' or can_finance(user)]
+        records = [entity(r) for r in c.execute('SELECT * FROM entities ORDER BY updated_at DESC').fetchall() if r['kind'] not in ('transactions', 'finance_profiles') or can_finance(user)]
     return {'records': records, 'config': {'finance_access': can_finance(user), 'drive_upload_ready': all(os.getenv(k) for k in ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN']), 'drive_folder_url': 'https://drive.google.com/drive/folders/' + DRIVE_FOLDER, 'sheet_url': SHEET_URL if can_finance(user) else None}}
 
 
@@ -371,7 +393,7 @@ def activity(request: Request, entity_id: str = '', limit: int = 100):
     sql = 'SELECT a.*, u.name AS actor_name FROM audit a LEFT JOIN users u ON a.actor=u.id WHERE 1=1'
     params = []
     if entity_id: sql += ' AND a.entity_id=?'; params.append(entity_id)
-    if not can_finance(user): sql += " AND a.kind <> 'transactions'"
+    if not can_finance(user): sql += " AND a.kind NOT IN ('transactions', 'finance_profiles')"
     sql += ' ORDER BY a.at DESC LIMIT ?'; params.append(max(1, min(limit, 500)))
     with db() as c:
         return [{**dict(r), 'before': json.loads(r['before_data']), 'after': json.loads(r['after_data'])} for r in c.execute(sql, params).fetchall()]
@@ -380,7 +402,7 @@ def activity(request: Request, entity_id: str = '', limit: int = 100):
 @app.post('/api/records/{kind}')
 def create_record(kind: str, body: dict, request: Request):
     user = current_user(request)
-    if kind == 'transactions' and not can_finance(user): fail('无财务权限', 403)
+    if kind in ('transactions', 'finance_profiles') and not can_finance(user): fail('无财务权限', 403)
     with db() as c:
         lock_records(c)
         data = prepare_record(c, kind, body, user)
@@ -391,7 +413,7 @@ def create_record(kind: str, body: dict, request: Request):
 @app.patch('/api/records/{kind}/{item_id}')
 def update_record(kind: str, item_id: str, body: dict, request: Request):
     user = current_user(request)
-    if kind == 'transactions' and not can_finance(user): fail('无财务权限', 403)
+    if kind in ('transactions', 'finance_profiles') and not can_finance(user): fail('无财务权限', 403)
     with db() as c:
         lock_records(c)
         row = c.execute('SELECT * FROM entities WHERE id=? AND kind=?', (item_id, kind)).fetchone()

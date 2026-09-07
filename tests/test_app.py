@@ -108,6 +108,7 @@ def test_database_reopen(client):
 def test_finance_permission_enforced_on_all_endpoints(client,monkeypatch):
     ready(client)
     client.post('/api/records/transactions',json={'title':'private','date':'2026-09-06','amount':'1'})
+    profile=client.post('/api/records/finance_profiles',json={'title':'private ledger'}).json()
     client.post('/api/users',json={'name':'M','username':'member','password':'member-password-123!'})
     login(client,'member','member-password-123!')
     client.post('/api/password',json={'current_password':'member-password-123!','password':'changed-member-123!'})
@@ -116,7 +117,9 @@ def test_finance_permission_enforced_on_all_endpoints(client,monkeypatch):
     monkeypatch.setattr(app,'FINANCE_MEMBERS',False)
     assert client.get('/api/state').json()['records']==[]
     assert client.post('/api/records/transactions',json={}).status_code==403
-    assert all(x['kind']!='transactions' for x in client.get('/api/activity').json())
+    assert client.post('/api/records/finance_profiles',json={}).status_code==403
+    assert client.patch('/api/records/finance_profiles/'+profile['id'],json={'version':1,'title':'forged'}).status_code==403
+    assert all(x['kind'] not in ('transactions','finance_profiles') for x in client.get('/api/activity').json())
 
 def test_upload_multipart_and_audit(client,monkeypatch):
     ready(client);p=project(client)

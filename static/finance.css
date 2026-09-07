@@ -1,0 +1,32 @@
+.finance-profile-bar{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;margin-bottom:22px}
+.finance-profile-bar .field{flex:1;min-width:180px;max-width:380px;margin:0}
+.finance-profile-description{margin:-8px 0 20px;color:var(--muted);font-size:13px;white-space:pre-wrap;overflow-wrap:anywhere}
+.ledger-summary{border:1px solid var(--line);border-radius:12px;background:white;margin-bottom:16px;overflow:hidden}
+.ledger-currency{display:grid;grid-template-columns:65px repeat(4,minmax(0,1fr));gap:15px;padding:20px;align-items:center}
+.ledger-currency+.ledger-currency{border-top:1px solid var(--line)}
+.ledger-currency small{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}
+.ledger-currency strong{font-size:20px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.ledger-currency .currency-code{font-size:13px;font-weight:650;color:var(--muted)}
+.finance-filters{display:flex;gap:10px;flex-wrap:wrap;margin:20px 0 12px}
+.finance-filters input{flex:2;min-width:180px}
+.finance-filters select{flex:1;min-width:140px}
+.ledger-scroll{max-width:100%;overflow:auto;max-height:70vh;border:1px solid var(--line);border-radius:12px;background:white;isolation:isolate}
+.ledger-scroll:focus-visible{outline:2px solid var(--blue);outline-offset:3px}
+.ledger-table{border-collapse:separate;border-spacing:0;font-size:13px;width:100%;white-space:nowrap}
+.ledger-table th,.ledger-table td{padding:13px 15px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;background:white}
+.ledger-table th{position:sticky;top:0;z-index:2;background:#eef4f8;color:var(--muted);font-size:12px;font-weight:600}
+.ledger-table th:first-child,.ledger-table td:first-child{position:sticky;left:0;z-index:1;min-width:170px;max-width:240px;border-right:1px solid var(--line);white-space:normal;overflow-wrap:anywhere}
+.ledger-table th:first-child{z-index:3;background:#eef4f8}
+.ledger-table td:first-child .text-button{display:block;text-align:left;white-space:normal;font-weight:650;line-height:1.6}
+.ledger-table td:first-child small{display:block;color:var(--muted);margin-top:6px}
+.ledger-table td.numeric{text-align:right;font-variant-numeric:tabular-nums}
+.ledger-table .ledger-note{white-space:pre-wrap;min-width:200px;max-width:300px;overflow-wrap:anywhere}
+.ledger-table tr:last-child td{border-bottom:0}
+.reimbursement-badge{display:inline-block;border-radius:5px;padding:4px 7px;font-size:12px;background:#edf1f5;color:#526679}
+.reimbursement-badge.pending{background:#fff1dd;color:#86521d}
+.reimbursement-badge.done{background:#e9f5ed;color:#286246}
+.reimbursement-fields{border:1px solid var(--line);border-radius:10px;padding:16px;min-width:0;margin:10px 0}
+.reimbursement-fields legend{font-size:14px;font-weight:650;padding:0 6px}
+.reimbursement-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.reimbursement-fields .hint{margin:12px 0 0}
+@media(max-width:700px){.finance-profile-bar{gap:10px}.finance-profile-bar .field{max-width:none;flex-basis:100%}.ledger-currency{grid-template-columns:1fr 1fr;padding:16px;gap:16px}.ledger-currency .currency-code{grid-column:1/-1}.ledger-currency strong{font-size:18px}.finance-filters input{flex-basis:100%}.finance-filters select{min-width:150px}.ledger-table th,.ledger-table td{padding:12px}.ledger-table th:first-child,.ledger-table td:first-child{min-width:130px;max-width:150px}.reimbursement-grid{grid-template-columns:1fr}.ledger-scroll{max-height:65vh}}
