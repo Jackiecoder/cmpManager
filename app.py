@@ -305,6 +305,9 @@ def validate(kind, data, c):
             if not section or json.loads(section['data'])['project_id'] != out.get('project_id'):
                 fail('分区不存在或不属于所选项目')
     if kind == 'notes':
+        out['show_on_timeline'] = data.get('show_on_timeline', True)
+        if not isinstance(out['show_on_timeline'], bool):
+            fail('加入时间线必须为是或否')
         out['linked_task_id'] = text_field(data, 'linked_task_id', 80)
         if out['linked_task_id']:
             task = c.execute("SELECT data FROM entities WHERE id=? AND kind='tasks'", (out['linked_task_id'],)).fetchone()
