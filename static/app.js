@@ -59,7 +59,12 @@ function draw() {
  applyTimelineColors();
 }
 function renderPage() {return ({home:homePage,projects:projectsPage,finance:financePage,tasks:tasksPage,activity:activityPage,users:usersPage}[view]||homePage)();}
-function projectCard(p) {return `<button class="project-card" data-project="${p.id}"><div class="spread"><h3>${esc(p.title)}</h3>${badge(p.status)}</div><p>${esc(p.description || '还没有项目说明')}</p><div class="spread meta"><span>${esc(person(p.owner_id))}</span><span>${p.progress}%</span></div><progress class="progress" value="${p.progress}" max="100" aria-label="${esc(p.title)}进度"></progress><div class="spread meta"><span>${p.due_date?esc(p.due_date)+' 截止':'未设截止日'}</span><span>${byKind('tasks').filter(t=>t.project_id===p.id&&t.status!=='已完成').length} 项待办</span></div></button>`;}
+function projectCard(p) {
+ const latest = CmpTimeline.notesForProject(records, p.id)[0];
+ return `<button class="project-card" data-project="${p.id}"><div class="spread"><h3>${esc(p.title)}</h3>${badge(p.status)}</div><p>${esc(p.description || '还没有项目说明')}</p>
+ <div class="card-timeline"><span class="meta">最近时间线</span>${latest ? `<div class="card-timeline-entry" data-timeline-project="${p.id}" data-timeline-section="${esc(latest.subsection_id||'')}"><span class="timeline-section">${esc(sectionName(latest.subsection_id))} · <time datetime="${esc(latest.date)}">${esc(latest.date)}</time></span><strong>${esc(latest.title)}</strong></div>` : '<span class="meta">暂无时间线记录</span>'}</div>
+ <div class="spread meta"><span>${p.due_date?esc(p.due_date)+' 截止':'未设截止日'}</span><span>${byKind('tasks').filter(t=>t.project_id===p.id&&t.status!=='已完成').length} 项待办</span></div></button>`;
+}
 function homePage() {
  const active=byKind('projects').filter(p=>p.status==='进行中'), pending=byKind('tasks').filter(t=>t.status!=='已完成');
  return `<section class="welcome"><div><h2>${esc(me.name)}，欢迎回来</h2><p>${new Intl.DateTimeFormat('zh-CN',{month:'long',day:'numeric',weekday:'long'}).format(new Date())}<br>${active.length} 个项目正在推进</p></div><div class="welcome-count"><strong>${pending.filter(t=>t.assignee_id===me.id).length}</strong><small>我的未完成待办</small></div></section><div class="two-col"><section><div class="section-title"><h2>正在推进</h2><button class="text-button" data-view="projects">全部项目 ${icon('arrow')}</button></div>${active.length?`<div class="project-grid">${active.slice(0,4).map(projectCard).join('')}</div>`:`<div class="panel">${empty('从一个项目开始','新建项目后，可以一起记录沟通、上传资料、分配待办。','new-project','新建项目')}</div>`}<div class="section-title section-space"><h2>接下来要做</h2><button class="text-button" data-view="tasks">全部待办 ${icon('arrow')}</button></div><div class="panel">${pending.length?pending.slice().sort((a,b)=>(a.due_date||'9999').localeCompare(b.due_date||'9999')).slice(0,5).map(taskRow).join(''):empty('暂无待办','把需要跟进的事情记录下来，分配给负责的成员。','new-task','添加待办','tasks')}</div></section><section><div class="section-title"><h2>团队动态</h2><button class="text-button" data-view="activity">全部记录 ${icon('arrow')}</button></div><div class="panel">${activityList(events.slice(0,8))}</div><div class="section-title"><h2>常用资料</h2></div><div class="panel">${config.finance_access?`<a class="row" href="${esc(config.sheet_url)}" target="_blank" rel="noopener">${icon('finance')}<div class="row-main"><h3>原始收支记账本</h3><p>查看 Google Sheets 原表</p></div>${icon('arrow')}</a>`:''}<a class="row" href="${esc(config.drive_folder_url)}" target="_blank" rel="noopener">${icon('file')}<div class="row-main"><h3>公司文件夹</h3><p>打开 Google Drive</p></div>${icon('arrow')}</a></div></section></div>`;
@@ -89,8 +94,11 @@ function projectTimeline(project) {
  </section>`;
 }
 function applyTimelineColors() {
- const colors = CmpTimeline.sectionColors(records, projectId);
+ const colorMaps = new Map();
  document.querySelectorAll('[data-timeline-section]').forEach(el => {
+   const id = el.dataset.timelineProject || projectId;
+   if (!colorMaps.has(id)) colorMaps.set(id, CmpTimeline.sectionColors(records, id));
+   const colors = colorMaps.get(id);
    el.style.setProperty('--section-color', colors[el.dataset.timelineSection] || colors['']);
  });
 }
@@ -157,7 +165,7 @@ function editor(kind,id) {
  const record=id?find(id):null, data=record||{date:today(),project_id:projectId||'',subsection_id:subsectionId==='unassigned'?'':subsectionId,currency:'USD',direction:'支出'};
  let content='';
  if(kind==='subsections')content=field('title','分区名称',data.title,'text','required maxlength="120" placeholder="例如：店家联系、工厂一联系"')+projectSelect(data.project_id,true)+area('description','分区说明',data.description);
- if(kind==='projects') content=field('title','项目名称',data.title,'text','required maxlength="120"')+select('status','状态',['进行中','待启动','暂停','已完成'],data.status||'进行中')+peopleSelect('owner_id','负责人',data.owner_id)+field('due_date','截止日期',data.due_date,'date')+field('progress','进度（%）',data.progress??0,'number','min="0" max="100" step="1" required')+area('description','项目说明',data.description);
+ if(kind==='projects') content=field('title','项目名称',data.title,'text','required maxlength="120"')+select('status','状态',['进行中','待启动','暂停','已完成'],data.status||'进行中')+field('due_date','截止日期',data.due_date,'date')+area('description','项目说明',data.description);
  if(kind==='transactions')content=field('title','事项 / 项目名称',data.title,'text','required maxlength="200"')+field('date','日期',data.date,'date','required')+select('direction','收支',['支出','收入'],data.direction)+select('currency','原币币种',['USD','CNY'],data.currency)+field('amount','原币金额',data.amount,'number','min="0" step="0.01" required')+field('usd_amount','折合美元（人民币流水填写）',data.usd_amount,'number','min="0" step="0.01"')+field('event','事件 / 活动',data.event)+projectSelect(data.project_id)+select('payment_status','支付状态',['未付','已付','部分支付'],data.payment_status||'未付')+field('payment_method','付款形式',data.payment_method,'text','placeholder="现金、支票、转账…"')+select('posting_status','入账状态',['未入账','平帐','部分入账'],data.posting_status||'未入账')+field('booked_amount','入账金额（原币）',data.booked_amount,'number','min="0" step="0.01"')+field('responsible','负责人',data.responsible)+field('category','类别',data.category)+area('note','备注',data.note);
  if(kind==='notes')content=field('title','笔记标题',data.title,'text','required maxlength="200"')+field('date','沟通日期',data.date,'date','required')+field('contact','客户 / 联系人',data.contact)+projectSelect(data.project_id,true)+area('body','沟通内容与项目进展',data.body,true);
  if(kind==='tasks')content=field('title','要做什么',data.title,'text','required maxlength="200"')+select('status','状态',['待办','进行中','已完成'],data.status||'待办')+peopleSelect('assignee_id','负责人',data.assignee_id)+field('due_date','截止日期',data.due_date,'date')+projectSelect(data.project_id)+area('description','补充说明',data.description);
@@ -207,8 +215,8 @@ document.addEventListener('click',async e=>{
   }}
  }catch(error){toast(error.message);b.disabled=false;}
 });
-document.addEventListener('input',e=>{if(e.target.id==='search'){const pos=e.target.selectionStart;search=e.target.value;$('#page').innerHTML=renderPage();const input=$('#search');input.focus();input.setSelectionRange(pos,pos);}});
-document.addEventListener('change',e=>{if(e.target.name==='task_action')syncTaskControls();if(e.target.name==='project_id')refreshProjectFields();if(e.target.id==='filter'){filter=e.target.value;$('#page').innerHTML=renderPage();}});
+document.addEventListener('input',e=>{if(e.target.id==='search'){const pos=e.target.selectionStart;search=e.target.value;$('#page').innerHTML=renderPage();applyTimelineColors();const input=$('#search');input.focus();input.setSelectionRange(pos,pos);}});
+document.addEventListener('change',e=>{if(e.target.name==='task_action')syncTaskControls();if(e.target.name==='project_id')refreshProjectFields();if(e.target.id==='filter'){filter=e.target.value;$('#page').innerHTML=renderPage();applyTimelineColors();}});
 window.addEventListener('online',()=>{if(me&&!me.must_change)load().catch(e=>toast(e.message));});
 window.addEventListener('offline',()=>toast('当前离线，请联网后保存记录'));
 $('#modal').addEventListener('cancel',()=>{if(me?.must_change){me=null;loginPage();}});
