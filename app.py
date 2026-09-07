@@ -13,6 +13,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 import requests
 from fastapi import FastAPI, Request, Response, HTTPException, UploadFile, File, Form
@@ -275,8 +276,79 @@ def date_field(data, key, required=False):
     return value
 
 
+STOCK_TYPES = {
+    '期初入库': 1, '采购入库': 1, '销售出库': -1, '领用出库': -1,
+    '销售退货入库': 1, '采购退货出库': -1, '盘盈入库': 1, '盘亏出库': -1,
+}
+STOCK_FINANCE = {'采购入库': '支出', '销售出库': '收入', '销售退货入库': '支出', '采购退货出库': '收入'}
+
+
+def quantity(data, key, positive=False):
+    try:
+        value = Decimal(str(data.get(key, '0') or '0'))
+        if not value.is_finite() or value < 0 or value > Decimal('999999999') or value != value.quantize(Decimal('.001')):
+            raise ValueError()
+        if positive and value == 0: raise ValueError()
+        return str(value.quantize(Decimal('.001')))
+    except (InvalidOperation, ValueError): fail('数量须为非负数，最多三位小数；出入库数量须大于零')
+
+
+def validate_stock_link(c, movement, transaction):
+    if movement.get('project_id', '') != transaction.get('project_id', ''):
+        fail('库存流水和财务记录须属于同一项目（或均不关联项目）')
+    expected = STOCK_FINANCE.get(movement['movement_type'])
+    if not expected: fail('此出入库类型不关联收支，请使用采购、销售或退货类型')
+    if transaction['direction'] != expected: fail('关联财务记录的收支方向与出入库类型不一致')
+
+
+def check_product(c, data, item_id=None, before=None):
+    for row in c.execute("SELECT id, data FROM entities WHERE kind='products'").fetchall():
+        if row['id'] != item_id and json.loads(row['data'])['sku'].casefold() == data['sku'].casefold():
+            fail('SKU 已存在，请使用不同的商品编号')
+    if before and before['unit'] != data['unit']:
+        for row in c.execute("SELECT data FROM entities WHERE kind='stock_movements'").fetchall():
+            if json.loads(row['data'])['product_id'] == item_id: fail('已有出入库记录，不能改变计量单位；请新建不同单位的商品')
+
+
+def check_stock_balance(c, data, exclude_id=None):
+    # Rebuild affected warehouse/product balances by day. The caller holds the
+    # global transaction lock, including while linked finance and audit are saved.
+    affected = {(data['warehouse_id'], data['product_id'])}
+    rows = c.execute("SELECT id, data FROM entities WHERE kind='stock_movements'").fetchall()
+    for row in rows:
+        if row['id'] == exclude_id:
+            old = json.loads(row['data'])
+            affected.add((old['warehouse_id'], old['product_id']))
+    days = {}
+    for item in [json.loads(r['data']) for r in rows if r['id'] != exclude_id] + [data]:
+        key = (item['warehouse_id'], item['product_id'])
+        if key not in affected: continue
+        daily = days.setdefault(key, {})
+        daily[item['date']] = daily.get(item['date'], Decimal('0')) + Decimal(item['quantity']) * STOCK_TYPES[item['movement_type']]
+    for daily in days.values():
+        balance = Decimal('0')
+        for day in sorted(daily):
+            balance += daily[day]
+            if balance < 0: fail(f'库存不足：这次操作会使 {day} 的库存低于零，请核对入库和出库记录')
+
+
 def validate(kind, data, c):
-    if kind == 'finance_profiles':
+    if kind == 'warehouses':
+        out = {'title': text_field(data, 'title', 120, True), 'description': text_field(data, 'description', 2000)}
+    elif kind == 'products':
+        out = {'title': text_field(data, 'title', 120, True), 'sku': text_field(data, 'sku', 80, True), 'unit': text_field(data, 'unit', 20, True), 'low_stock': quantity(data, 'low_stock'), 'description': text_field(data, 'description', 2000)}
+    elif kind == 'stock_movements':
+        out = {k: text_field(data, k, 80) for k in ('warehouse_id', 'project_id', 'linked_transaction_id')}
+        out.update(title=text_field(data, 'title', 200, True), product_id=text_field(data, 'product_id', 80, True), date=date_field(data, 'date', True), movement_type=choice(data, 'movement_type', STOCK_TYPES, '采购入库'), quantity=quantity(data, 'quantity', True), note=text_field(data, 'note', 2000))
+        if out['date'] > datetime.now(ZoneInfo('America/New_York')).date().isoformat():
+            fail('出入库只记录已发生的变动，日期不能晚于今天（纽约时间）')
+        if not c.execute("SELECT id FROM entities WHERE id=? AND kind='products'", (out['product_id'],)).fetchone(): fail('商品不存在')
+        if out['warehouse_id'] and not c.execute("SELECT id FROM entities WHERE id=? AND kind='warehouses'", (out['warehouse_id'],)).fetchone(): fail('仓库不存在')
+        if out['linked_transaction_id']:
+            transaction = c.execute("SELECT data FROM entities WHERE id=? AND kind='transactions'", (out['linked_transaction_id'],)).fetchone()
+            if not transaction: fail('关联财务记录不存在')
+            validate_stock_link(c, out, json.loads(transaction['data']))
+    elif kind == 'finance_profiles':
         out = {'title': text_field(data, 'title', 120, True), 'description': text_field(data, 'description', 2000)}
     elif kind == 'projects':
         try: progress = int(data.get('progress', 0))
@@ -320,7 +392,7 @@ def validate(kind, data, c):
         out = {'title': text_field(data, 'title', 200, True), 'url': url, 'project_id': text_field(data, 'project_id', 80, True)}
     else: fail('记录类型无效', 404)
     if out.get('project_id') and not c.execute('SELECT id FROM entities WHERE id=? AND kind=?', (out['project_id'], 'projects')).fetchone(): fail('关联项目不存在')
-    if kind in ('notes', 'tasks', 'files', 'transactions'):
+    if kind in ('notes', 'tasks', 'files', 'transactions', 'stock_movements'):
         out['subsection_id'] = text_field(data, 'subsection_id', 80)
         if out['subsection_id']:
             section = c.execute("SELECT data FROM entities WHERE id=? AND kind='subsections'", (out['subsection_id'],)).fetchone()
@@ -361,6 +433,26 @@ def insert_record(c, kind, data, actor):
 
 
 def prepare_record(c, kind, body, user):
+    if kind == 'stock_movements':
+        body = dict(body)
+        action = choice(body, 'finance_action', ['none', 'link', 'create', 'keep'], 'keep')
+        if (action in ('link', 'create') or body.get('linked_transaction_id')) and not can_finance(user): fail('无财务权限', 403)
+        if action == 'create' and body.get('linked_transaction_id'): fail('已有财务关联，请先解除关联，避免重复记账')
+        if action in ('none', 'create'): body['linked_transaction_id'] = ''
+        if action == 'link' and not body.get('linked_transaction_id'): fail('请选择已有财务记录')
+        data = validate(kind, body, c)
+        if action == 'create':
+            direction = STOCK_FINANCE.get(data['movement_type'])
+            if not direction: fail('此出入库类型不创建收支，请使用采购、销售或退货类型')
+            transaction = validate('transactions', {
+                'title': data['title'], 'date': data['date'], 'direction': direction,
+                'project_id': data['project_id'], 'subsection_id': data['subsection_id'],
+                'amount': body.get('finance_amount'), 'currency': body.get('finance_currency', 'USD'),
+                'profile_id': body.get('finance_profile_id', ''), 'payment_status': body.get('finance_payment_status', '未付'),
+                'responsible': body.get('finance_responsible', ''), 'note': data['note'],
+            }, c)
+            data['linked_transaction_id'] = insert_record(c, 'transactions', transaction, user['id'])
+        return data
     if kind != 'notes': return validate(kind, body, c)
     body = dict(body)
     action = choice(body, 'task_action', ['none', 'link', 'create', 'keep'], 'keep')
@@ -406,6 +498,8 @@ def create_record(kind: str, body: dict, request: Request):
     with db() as c:
         lock_records(c)
         data = prepare_record(c, kind, body, user)
+        if kind == 'products': check_product(c, data)
+        if kind == 'stock_movements': check_stock_balance(c, data)
         item_id = insert_record(c, kind, data, user['id'])
         return entity(c.execute('SELECT * FROM entities WHERE id=?', (item_id,)).fetchone())
 
@@ -421,6 +515,12 @@ def update_record(kind: str, item_id: str, body: dict, request: Request):
         if body.get('version') != row['version']: fail('其他成员已更新此记录，请刷新后再编辑', 409)
         before = json.loads(row['data'])
         data = prepare_record(c, kind, {**before, **body}, user)
+        if kind == 'products': check_product(c, data, item_id, before)
+        if kind == 'stock_movements': check_stock_balance(c, data, item_id)
+        if kind == 'transactions':
+            for movement in c.execute("SELECT data FROM entities WHERE kind='stock_movements'").fetchall():
+                movement = json.loads(movement['data'])
+                if movement.get('linked_transaction_id') == item_id: validate_stock_link(c, movement, data)
         if kind == 'subsections' and data['project_id'] != before['project_id']:
             fail('分区不能移动到其他项目，请在目标项目新建分区')
         if kind == 'tasks' and data.get('project_id') != before.get('project_id'):

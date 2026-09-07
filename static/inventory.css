@@ -1,0 +1,30 @@
+.inventory-tools{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;margin-bottom:20px}
+.inventory-tools .field{min-width:180px;max-width:350px;flex:1;margin:0}
+.inventory-filters{align-items:flex-end}
+.inventory-filters>input{height:46px}
+.inventory-filters .field{margin:0;flex:1;min-width:180px}
+[aria-label="库存余额表"] .ledger-table{min-width:800px}
+[aria-label="库存余额表"] .stock-links{flex-wrap:nowrap;min-width:150px;margin:0}
+[aria-label="库存余额表"] .stock-links .text-button{white-space:nowrap}
+.inventory-totals{display:flex;gap:24px;padding:17px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line);margin-bottom:20px;flex-wrap:wrap}
+.inventory-totals span{font-size:13px;color:var(--muted)}
+.inventory-totals strong{font-size:22px;color:var(--ink);margin-right:7px}
+.stock-quantity{font-variant-numeric:tabular-nums;font-size:17px;font-weight:650}
+.stock-low{color:#945518;background:#fff1dd;border-radius:5px;font-size:12px;padding:4px 6px}
+.stock-row{padding:18px 20px;border-bottom:1px solid var(--line)}
+.stock-row:last-child{border-bottom:0}
+.stock-row h3{font-size:15px;overflow-wrap:anywhere;margin:0 0 8px}
+.stock-row p{font-size:12px;color:var(--muted);margin:6px 0;overflow-wrap:anywhere}
+.stock-row .spread{align-items:flex-start;gap:15px}
+.stock-links{display:flex;gap:8px 16px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.stock-links .text-button{white-space:normal;text-align:left}
+.stock-finance{border:1px solid var(--line);border-radius:10px;padding:16px;min-width:0}
+.stock-finance legend{font-weight:650;font-size:14px;padding:0 6px}
+.stock-finance .field{margin:12px 0}
+.stock-finance [hidden]{display:none}
+.stock-linked-list{display:flex;flex-direction:column;align-items:flex-start;gap:8px;margin:12px 0}
+.stock-linked-list button{white-space:normal;text-align:left}
+.stock-availability{background:#edf5f8;padding:12px;border-radius:8px;margin:0;font-size:13px;color:#245971}
+.topbar .actions{flex-shrink:0}
+.topbar .primary{white-space:nowrap}
+@media(max-width:700px){.inventory-tools .field{flex-basis:100%;max-width:none}.inventory-totals{gap:14px}.inventory-totals strong{font-size:19px}.stock-row{padding:16px}.stock-row .stock-quantity{font-size:15px}.detail-tabs{overflow-x:auto}.detail-tabs button{white-space:nowrap}}

@@ -5,6 +5,7 @@ const icons = {
  home:'<path d="m3 10 9-7 9 7v10H3z"/><path d="M9 20v-7h6v7"/>',
  projects:'<rect x="3" y="6" width="18" height="15" rx="2"/><path d="M8 6V3h8v3M3 12h18M10 12v3h4v-3"/>',
  finance:'<rect x="3" y="5" width="18" height="15" rx="2"/><path d="M3 9h18m-5 5h3M7 3v2"/>',
+ inventory:'<path d="m3 8 9-5 9 5v13H3zM3 8h18M7 21V11h10v10M7 16h10"/>',
  tasks:'<rect x="4" y="3" width="16" height="18" rx="2"/><path d="m7 9 2 2 3-4m2 3h3M8 16h9"/>',
  activity:'<path d="M3 12h4l3-8 4 16 3-8h4"/>', users:'<circle cx="9" cy="8" r="3"/><path d="M3 21v-3a6 6 0 0 1 12 0v3m1-16a3 3 0 0 1 0 6m2 4a5 5 0 0 1 3 5"/>',
  plus:'<path d="M12 5v14M5 12h14"/>', refresh:'<path d="M20 7a9 9 0 1 0 1 8M20 2v6h-6"/>',
@@ -12,8 +13,8 @@ const icons = {
  note:'<path d="M5 3h10l4 4v14H5zM14 3v5h5M8 12h8m-8 4h6"/>', file:'<path d="M14 3H5v18h14V8zM14 3v5h5M8 13h8m-8 4h5"/>', logout:'<path d="M10 3H4v18h6m4-14 5 5-5 5M8 12h12"/>'
 };
 const icon = name => `<svg viewBox="0 0 24 24" aria-hidden="true">${icons[name] || icons.note}</svg>`;
-const labels = {home:'工作台',projects:'项目',finance:'财务',tasks:'待办',activity:'操作记录',users:'团队账号'};
-const kindLabels = {finance_profiles:'财务账本',subsections:'分区',projects:'项目',transactions:'财务记录',tasks:'待办',notes:'沟通笔记',files:'附件',user:'账号'};
+const labels = {home:'工作台',projects:'项目',finance:'财务',inventory:'库存',tasks:'待办',activity:'操作记录',users:'团队账号'};
+const kindLabels = {warehouses:'仓库',products:'商品',stock_movements:'出入库记录',finance_profiles:'财务账本',subsections:'分区',projects:'项目',transactions:'财务记录',tasks:'待办',notes:'沟通笔记',files:'附件',user:'账号'};
 let me, records = [], people = [], config = {}, events = [], view = 'home', projectId = null, projectTab = 'notes', search = '', filter = '', taskFilter = '未完成';
 let refreshTimer, toastTimer, lastSnapshot, subsectionId = '';
 let financeProfileId = '', reimbursementFilter = '';
@@ -51,16 +52,16 @@ async function load(render=true) {
  if(render && (changed || !$('.workspace'))) draw();
 }
 function empty(title, text, action, button, symbol='projects') {return `<div class="empty">${icon(symbol)}<h3>${title}</h3><p>${text}</p>${action?`<button class="primary" data-action="${action}">${esc(button)}</button>`:''}</div>`;}
-function nav(mobile=false) {return `<nav class="${mobile?'bottom-nav':'nav'}" aria-label="主导航">${(mobile?['home','projects','finance','tasks']:['home','projects','finance','tasks','activity',...(me.role==='admin'?['users']:[])]).filter(v=>v!=='finance'||config.finance_access).map(v=>`<button data-view="${v}" class="${view===v?'active':''}" ${view===v?'aria-current="page"':''}>${icon(v)}<span>${labels[v]}</span></button>`).join('')}</nav>`;}
+function nav(mobile=false) {return `<nav class="${mobile?'bottom-nav':'nav'}" aria-label="主导航">${(mobile?['home','projects','inventory','finance','tasks']:['home','projects','inventory','finance','tasks','activity',...(me.role==='admin'?['users']:[])]).filter(v=>v!=='finance'||config.finance_access).map(v=>`<button data-view="${v}" class="${view===v?'active':''}" ${view===v?'aria-current="page"':''}>${icon(v)}<span>${labels[v]}</span></button>`).join('')}</nav>`;}
 function draw() {
  if(!me) return;
  const title = projectId && view==='projects' ? '项目记录' : labels[view];
- const subtitles={home:'把公司的每一项工作，记录清楚。',projects:'进度、沟通和资料，在同一个地方。',finance:'每一笔收支，都有据可查。',tasks:'明确负责人，跟进每一个截止日。',activity:'团队的每次更新，都留有记录。',users:'一个人一个账号，每次更新都有署名。'};
- const add={projects:'projects',finance:'transactions',tasks:'tasks',users:'users'}[view];
+ const subtitles={home:'把公司的每一项工作，记录清楚。',projects:'进度、沟通和资料，在同一个地方。',inventory:'每一笔出入库，都能追溯到项目和收支。',finance:'每一笔收支，都有据可查。',tasks:'明确负责人，跟进每一个截止日。',activity:'团队的每次更新，都留有记录。',users:'一个人一个账号，每次更新都有署名。'};
+ const add={projects:'projects',inventory:'stock_movements',finance:'transactions',tasks:'tasks',users:'users'}[view];
  $('#root').innerHTML=`${!navigator.onLine?'<div class="network">当前离线。连接网络后才能查看最新记录和保存修改。</div>':''}<div class="shell"><aside class="sidebar"><div class="brand"><img src="/static/icon.svg" alt=""><div>公司工作台<small>Company Manager</small></div></div>${nav()}<button class="account" data-action="account"><span class="avatar">${initials(me.name)}</span><span>${esc(me.name)}<small>${me.role==='admin'?'管理员':'团队成员'}</small></span></button></aside><main class="workspace"><header class="topbar"><div><h1>${esc(title)}</h1><p class="subtle">${subtitles[view]}</p></div><div class="actions"><button class="icon-button refresh" data-action="refresh" aria-label="刷新记录" title="刷新记录">${icon('refresh')}</button>${add&&!projectId?`<button class="primary" data-new="${add}">${icon('plus')}<span>${view==='users'?'添加成员':'新增'}</span></button>`:''}<button class="mobile-account" data-action="account" aria-label="账号与设置"><span class="avatar">${initials(me.name)}</span></button></div></header><div id="page">${renderPage()}</div></main>${nav(true)}</div>`;
  applyTimelineColors();
 }
-function renderPage() {return ({home:homePage,projects:projectsPage,finance:financePage,tasks:tasksPage,activity:activityPage,users:usersPage}[view]||homePage)();}
+function renderPage() {return ({home:homePage,projects:projectsPage,inventory:inventoryPage,finance:financePage,tasks:tasksPage,activity:activityPage,users:usersPage}[view]||homePage)();}
 function projectCard(p) {
  const latest = CmpTimeline.notesForProject(records, p.id)[0];
  return `<button class="project-card" data-project="${p.id}"><div class="spread"><h3>${esc(p.title)}</h3>${badge(p.status)}</div><p>${esc(p.description || '还没有项目说明')}</p>
@@ -112,7 +113,7 @@ function projectPage() {
  const sectionBar=`<section class="subsections"><div class="section-title"><h2>项目分区</h2><button class="text-button" data-new="subsections">${icon('plus')} 新建分区</button></div><nav class="section-options" aria-label="项目分区">${[['','全部记录'],['unassigned','未分区'],...sections.map(r=>[r.id,r.title])].map(([id,title])=>`<button data-section="${id}" class="${subsectionId===id?'active':''}" aria-pressed="${subsectionId===id}">${esc(title)}</button>`).join('')}</nav>${currentSection?`<div class="spread"><p class="hint">${esc(currentSection.description||currentSection.title)}</p><button class="text-button" data-edit="${currentSection.id}">编辑分区</button></div>`:'<p class="hint">按店家、工厂或工作类别，把项目记录分开管理。</p>'}</section>`;
  return `<button class="back" data-action="back-projects">${icon('back')} 全部项目</button>
  <div class="panel detail-head"><div class="spread">${badge(p.status)}<button class="text-button" data-edit="${p.id}">编辑项目</button></div><h2>${esc(p.title)}</h2><p>${esc(p.description||'还没有项目说明')}</p>${projectTimeline(p)}</div>
- ${sectionBar}<nav class="detail-tabs" aria-label="项目内容">${[['notes','沟通笔记'],['tasks','待办'],['files','附件'],['transactions','收支']].filter(([k])=>k!=='transactions'||config.finance_access).map(([k,v])=>`<button data-tab="${k}" class="${projectTab===k?'active':''}">${v} ${byKind(k).filter(x=>x.project_id===p.id && inSection(x)).length}</button>`).join('')}</nav><div class="section-title"><h2>${{notes:'沟通与进展',tasks:'项目待办',files:'项目资料',transactions:'项目收支'}[projectTab]}</h2><button class="primary" data-new="${projectTab}">${icon('plus')} 添加</button></div>${projectTab==='files'&&!config.drive_upload_ready?'<div class="notice">Google Drive 直接上传尚未连接。现在可以添加已有文件链接，或打开公司文件夹上传后粘贴链接。</div>':''}${items.length?projectTab==='notes'?items.map(noteCard).join(''):`<div class="panel">${items.map(projectTab==='tasks'?taskRow:projectTab==='transactions'?transactionRow:fileRow).join('')}</div>`:`<div class="panel">${empty('暂无'+kindLabels[projectTab],'点击添加，把这个项目的实际信息记录下来。',null,null,projectTab==='files'?'file':'note')}</div>`}`;
+ ${sectionBar}<nav class="detail-tabs" aria-label="项目内容">${[['notes','沟通笔记'],['tasks','待办'],['files','附件'],['stock_movements','库存'],['transactions','收支']].filter(([k])=>k!=='transactions'||config.finance_access).map(([k,v])=>`<button data-tab="${k}" class="${projectTab===k?'active':''}">${v} ${byKind(k).filter(x=>x.project_id===p.id && inSection(x)).length}</button>`).join('')}</nav><div class="section-title"><h2>${{notes:'沟通与进展',tasks:'项目待办',files:'项目资料',stock_movements:'项目出入库',transactions:'项目收支'}[projectTab]}</h2><button class="primary" data-new="${projectTab}">${icon('plus')} 添加</button></div>${projectTab==='stock_movements'?'<p class="hint">这里展示当前项目与分区的出入库流水；仓库的实际可用余额请在“库存”中查看。</p>':''}${projectTab==='files'&&!config.drive_upload_ready?'<div class="notice">Google Drive 直接上传尚未连接。现在可以添加已有文件链接，或打开公司文件夹上传后粘贴链接。</div>':''}${items.length?projectTab==='notes'?items.map(noteCard).join(''):`<div class="panel">${projectTab==='stock_movements'?stockMovementList(items):items.map(projectTab==='tasks'?taskRow:projectTab==='transactions'?transactionRow:fileRow).join('')}</div>`:`<div class="panel">${empty('暂无'+kindLabels[projectTab],'点击添加，把这个项目的实际信息记录下来。',null,null,projectTab==='files'?'file':'note')}</div>`}`;
 }
 function noteCard(n) {return `<article class="note"><div class="spread"><h3>${esc(n.title)}</h3><button class="text-button" data-edit="${n.id}">编辑</button></div><p class="meta">${esc(sectionName(n.subsection_id))} · ${esc(n.date)}${n.contact?' · 与 '+esc(n.contact)+' 沟通':''}</p><div class="note-body">${esc(n.body)}</div>${n.linked_task_id&&find(n.linked_task_id)?`<div class="linked-task"><button class="text-button" data-edit="${n.linked_task_id}">${icon('tasks')} ${esc(find(n.linked_task_id).title)}</button>${badge(find(n.linked_task_id).status)}</div>`:''}<p class="meta">${esc(person(n.updated_by))} · ${formatTime(n.updated_at)} <button class="text-button" data-history="${n.id}">修改记录</button></p></article>`;}
 function fileRow(f) {return `<div class="row">${icon('file')}<div class="row-main"><h3><a href="${esc(f.url)}" target="_blank" rel="noopener">${esc(f.title)}</a></h3><p>${esc(sectionName(f.subsection_id))} · ${esc(person(f.created_by))} · ${formatTime(f.created_at)}</p></div><button class="text-button" data-edit="${f.id}">编辑</button></div>`;}
@@ -206,6 +207,7 @@ function refreshProjectFields() {
 }
 
 function editor(kind,id) {
+ if(['warehouses','products','stock_movements'].includes(kind)){inventoryEditor(kind,id);return;}
  if(kind==='users'){userEditor();return;}
  const record=id?find(id):null, data=record||{date:today(),project_id:projectId||'',subsection_id:subsectionId==='unassigned'?'':subsectionId,profile_id:financeProfileId,currency:'USD',direction:'支出'};
  let content='';
@@ -217,7 +219,7 @@ function editor(kind,id) {
  if(kind==='tasks')content=field('title','要做什么',data.title,'text','required maxlength="200"')+select('status','状态',['待办','进行中','已完成'],data.status||'待办')+peopleSelect('assignee_id','负责人',data.assignee_id)+field('due_date','截止日期',data.due_date,'date')+projectSelect(data.project_id)+area('description','补充说明',data.description);
  if(kind==='files')content=field('title','文件名称',data.title,'text','required')+projectSelect(data.project_id,true)+field('url','Google Drive 文件链接',data.url,'url','required placeholder="https://drive.google.com/…"');
  if(['notes','tasks','files','transactions'].includes(kind)) content+=sectionSelect(data.project_id,data.subsection_id);
- if(kind==='transactions')content=financeProfileSelect(data.profile_id)+content+reimbursementFields(data);
+ if(kind==='transactions')content=financeProfileSelect(data.profile_id)+content+reimbursementFields(data)+(id?stockFinanceLinks(id):'');
  if(kind==='notes') content+=`<label class="timeline-toggle wide"><input type="checkbox" name="show_on_timeline" ${data.show_on_timeline!==false?'checked':''}><span>加入项目时间线<small>取消后仍会保存在沟通笔记中。</small></span></label>`+noteTaskControls(data);
  if(kind==='tasks'&&id) {const linked=byKind('notes').filter(n=>n.linked_task_id===id);if(linked.length)content+=`<section class="wide"><h3>关联笔记</h3>${linked.map(n=>`<button type="button" class="text-button" data-edit="${n.id}">${icon('note')} ${esc(n.title)}</button>`).join('<br>')}</section>`;}
  const uploads=kind==='files'&&!id?`<div class="notice">${config.drive_upload_ready?'可以直接上传文件到公司 Drive 文件夹。':'直接上传需要管理员配置 Google Drive 授权。可先在公司文件夹上传，再把文件链接填入下面。'} <a href="${esc(config.drive_folder_url)}" target="_blank" rel="noopener">打开文件夹</a></div>${config.drive_upload_ready?'<button class="secondary" data-action="upload-form">从手机 / 电脑上传</button><br><br>':''}`:'';
@@ -231,9 +233,10 @@ function userEditor(id) {const p=people.find(x=>x.id===id);openModal(id?'重置 
 function passwordForm() {openModal('修改密码',formWrap(field('current_password','当前密码','','password','required autocomplete="current-password"')+field('password','新密码（至少 12 位）','','password','required minlength="12" maxlength="128" autocomplete="new-password"')+field('confirm_password','再次输入新密码','','password','required minlength="12" autocomplete="new-password"'),'修改并重新登录'));bindSubmit(async form=>{if(form.get('password')!==form.get('confirm_password'))throw new Error('两次输入的新密码不一致');await api('/password','POST',Object.fromEntries(form));me=null;closeModal();loginPage();toast('密码已更新，请使用新密码登录');});}
 function account() {openModal('账号与设置',`<div class="account"><span class="avatar">${initials(me.name)}</span><div>${esc(me.name)}<small>${esc(me.username)} · ${me.role==='admin'?'管理员':'团队成员'}</small></div></div><div class="panel"><button class="row clickable" data-action="password"><div class="row-main"><h3>修改密码</h3></div>${icon('arrow')}</button><button class="row clickable" data-view="activity"><div class="row-main"><h3>操作记录</h3></div>${icon('arrow')}</button>${me.role==='admin'?'<button class="row clickable" data-view="users"><div class="row-main"><h3>团队账号管理</h3></div>'+icon('arrow')+'</button>':''}<button class="row clickable" data-action="refresh"><div class="row-main"><h3>刷新全部记录</h3></div>${icon('refresh')}</button><button class="row clickable" data-action="logout"><div class="row-main"><h3>退出登录</h3></div>${icon('logout')}</button></div><p class="hint">手机安装：iPhone Safari → 分享 → 添加到主屏幕；Android Chrome → 菜单 → 安装应用。使用时需要网络连接。</p>`);}
 const fieldLabels={subsection_id:'分区',linked_task_id:'关联待办',title:'标题',name:'姓名',date:'日期',event:'事件',amount:'原币金额',usd_amount:'美元折算金额',currency:'币种',direction:'收支',payment_status:'支付状态',posting_status:'入账状态',booked_amount:'入账金额',payment_method:'付款形式',responsible:'负责人',category:'类别',note:'备注',description:'说明',body:'正文',contact:'联系人',status:'状态',progress:'进度',due_date:'截止日',project_id:'项目',owner_id:'负责人',assignee_id:'负责人',username:'账号',role:'角色',active:'启用',must_change:'需改密码',url:'链接'};
-function auditText(data) {if(!data)return '无';return Object.entries(data).filter(([k])=>k!=='id').map(([k,v])=>`${fieldLabels[k]||k}：${k==='profile_id'?financeProfileName(v):k==='project_id'?projectName(v):k==='subsection_id'?sectionName(v):k==='linked_task_id'?(find(v)?.title||'未关联'):['owner_id','assignee_id'].includes(k)?person(v):v??'未填写'}`).join('\n');}
+function auditText(data) {if(!data)return '无';return Object.entries(data).filter(([k])=>k!=='id').map(([k,v])=>`${fieldLabels[k]||k}：${k==='warehouse_id'?warehouseName(v):k==='product_id'?productName(v):k==='linked_transaction_id'?(find(v)?.title||'未关联'):k==='profile_id'?financeProfileName(v):k==='project_id'?projectName(v):k==='subsection_id'?sectionName(v):k==='linked_task_id'?(find(v)?.title||'未关联'):['owner_id','assignee_id'].includes(k)?person(v):v??'未填写'}`).join('\n');}
 fieldLabels.show_on_timeline='加入时间线';
 Object.assign(fieldLabels,{profile_id:'财务账本',reimbursement_status:'报销状态',claim_amount:'应报金额',reimbursed_amount:'累计已报金额',reimbursement_date:'最近报销日期',reimbursement_note:'报销备注'});
+Object.assign(fieldLabels,{warehouse_id:'仓库',product_id:'商品',linked_transaction_id:'关联财务',movement_type:'出入库类型',quantity:'数量',sku:'SKU',unit:'计量单位',low_stock:'低库存提醒线'});
 function showAudit(a) {openModal('修改详情',`<p class="meta">${esc(a.actor_name)} · ${formatTime(a.at)} · ${esc(a.action)}</p><div class="audit-columns"><section><h3>修改前</h3><div class="audit-data">${esc(auditText(a.before))}</div></section><section><h3>修改后</h3><div class="audit-data">${esc(auditText(a.after))}</div></section></div>`);}
 async function history(id) {const data=await api('/activity?entity_id='+encodeURIComponent(id));openModal('这条记录的修改历史',activityList(data));$('#modal').querySelectorAll('[data-audit]').forEach(button=>button.addEventListener('click',e=>{e.stopPropagation();showAudit(data.find(a=>a.id===button.dataset.audit));}));}
 function uploadForm() {openModal('上传项目附件',formWrap(projectSelect(projectId||'',true)+sectionSelect(projectId||'',subsectionId==='unassigned'?'':subsectionId)+field('file','文件（最大 20 MB）','','file','required'),'上传到 Google Drive'));bindSubmit(async form=>{if(form.get('file').size>20*1024*1024)throw new Error('文件不能超过 20 MB');await api('/upload','POST',form);closeModal();await load();toast('文件已保存到 Google Drive');});}
@@ -247,6 +250,10 @@ document.addEventListener('click',async e=>{
   else if(b.dataset.new)editor(b.dataset.new);
   else if(b.dataset.edit){const r=find(b.dataset.edit);editor(r.kind,r.id);}
   else if(b.dataset.reimburse)reimbursementEditor(b.dataset.reimburse);
+  else if(b.dataset.stockIn)inventoryEditor('stock_movements',null,{product_id:b.dataset.stockIn,movement_type:'采购入库'});
+  else if(b.dataset.stockOut)inventoryEditor('stock_movements',null,{product_id:b.dataset.stockOut,movement_type:'销售出库'});
+  else if(b.dataset.stockLedger){stockProductFilter=b.dataset.stockLedger;inventoryTab='movements';draw();}
+  else if(b.dataset.inventoryTab){inventoryTab=b.dataset.inventoryTab;draw();}
   else if(b.dataset.project){view='projects';projectId=b.dataset.project;subsectionId='';projectTab='notes';draw();window.scrollTo(0,0);}
   else if(b.hasAttribute('data-section')){subsectionId=b.dataset.section;draw();}
   else if(b.dataset.tab){projectTab=b.dataset.tab;draw();}
@@ -258,6 +265,7 @@ document.addEventListener('click',async e=>{
   else if(b.dataset.userActive){const u=people.find(p=>p.id===b.dataset.userActive);openModal((u.active?'停用':'启用')+' '+u.name,formWrap(`<p class="wide">${u.active?'停用后，该成员将立即退出登录，历史署名会保留。':'启用后，该成员可以再次登录。'}</p>`,'确认'+(u.active?'停用':'启用')));bindSubmit(async()=>{await api('/users/'+u.id,'PATCH',{active:!u.active});closeModal();await load();toast('账号已更新');});}
   else if(b.dataset.action){switch(b.dataset.action){
    case 'new-project':editor('projects');break;case 'new-task':editor('tasks');break;case 'new-transaction':editor('transactions');break;
+   case 'new-product':inventoryEditor('products');break;case 'new-stock':inventoryEditor('stock_movements');break;
    case 'account':account();break;case 'close-modal':if(me?.must_change){me=null;loginPage();}closeModal();break;
    case 'back-projects':projectId=null;draw();break;case 'password':passwordForm();break;case 'upload-form':uploadForm();break;
    case 'refresh':await load();closeModal();toast('已刷新');break;
@@ -269,6 +277,12 @@ document.addEventListener('input',e=>{if(e.target.id==='search'){const pos=e.tar
 document.addEventListener('change',e=>{
  if(e.target.name==='task_action')syncTaskControls();
  if(e.target.name==='project_id')refreshProjectFields();
+ if(e.target.name==='project_id'&&$('#editor [name=movement_type]'))syncStockFinance(true);
+ if(e.target.name==='movement_type')syncStockFinance(true);
+ if(e.target.name==='finance_action')syncStockFinance();
+ if(['product_id','warehouse_id'].includes(e.target.name))stockAvailability();
+ if(e.target.name==='inventory_warehouse'){warehouseId=e.target.value;search='';draw();}
+ if(e.target.name==='stock_product_filter'){stockProductFilter=e.target.value;draw();}
  if(['direction','reimbursement_status'].includes(e.target.name))syncReimbursementFields();
  if(e.target.name==='finance_profile'){financeProfileId=e.target.value;search='';filter='';reimbursementFilter='';draw();}
  if(e.target.id==='reimbursement-filter'){reimbursementFilter=e.target.value;draw();}
