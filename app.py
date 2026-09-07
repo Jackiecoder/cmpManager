@@ -281,6 +281,8 @@ def validate(kind, data, c):
         except (ValueError, TypeError): fail('进度须为 0–100 的整数')
         if not 0 <= progress <= 100: fail('进度须在 0–100 之间')
         out = {'title': text_field(data, 'title', 120, True), 'description': text_field(data, 'description', 10000), 'status': choice(data, 'status', ['进行中', '待启动', '暂停', '已完成'], '进行中'), 'progress': progress, 'due_date': date_field(data, 'due_date'), 'owner_id': text_field(data, 'owner_id', 80)}
+    elif kind == 'subsections':
+        out = {'title': text_field(data, 'title', 120, True), 'description': text_field(data, 'description', 5000), 'project_id': text_field(data, 'project_id', 80, True)}
     elif kind == 'transactions':
         out = {k: text_field(data, k, 2000 if k == 'note' else 150) for k in ['event', 'category', 'payment_method', 'responsible', 'note', 'project_id']}
         out.update(title=text_field(data, 'title', 200, True), date=date_field(data, 'date', True), direction=choice(data, 'direction', ['收入', '支出'], '支出'), currency=choice(data, 'currency', ['USD', 'CNY'], 'USD'), amount=money(data, 'amount', True), usd_amount=money(data, 'usd_amount'), booked_amount=money(data, 'booked_amount'), payment_status=choice(data, 'payment_status', ['已付', '未付', '部分支付'], '未付'), posting_status=choice(data, 'posting_status', ['平帐', '未入账', '部分入账'], '未入账'))
@@ -296,6 +298,18 @@ def validate(kind, data, c):
         out = {'title': text_field(data, 'title', 200, True), 'url': url, 'project_id': text_field(data, 'project_id', 80, True)}
     else: fail('记录类型无效', 404)
     if out.get('project_id') and not c.execute('SELECT id FROM entities WHERE id=? AND kind=?', (out['project_id'], 'projects')).fetchone(): fail('关联项目不存在')
+    if kind in ('notes', 'tasks', 'files', 'transactions'):
+        out['subsection_id'] = text_field(data, 'subsection_id', 80)
+        if out['subsection_id']:
+            section = c.execute("SELECT data FROM entities WHERE id=? AND kind='subsections'", (out['subsection_id'],)).fetchone()
+            if not section or json.loads(section['data'])['project_id'] != out.get('project_id'):
+                fail('分区不存在或不属于所选项目')
+    if kind == 'notes':
+        out['linked_task_id'] = text_field(data, 'linked_task_id', 80)
+        if out['linked_task_id']:
+            task = c.execute("SELECT data FROM entities WHERE id=? AND kind='tasks'", (out['linked_task_id'],)).fetchone()
+            if not task or json.loads(task['data']).get('project_id') != out['project_id']:
+                fail('请选择同一项目中的待办')
     for key in ('owner_id', 'assignee_id'):
         if out.get(key) and not c.execute('SELECT id FROM users WHERE id=? AND active=1', (out[key],)).fetchone(): fail('成员不存在或已停用')
     return out
@@ -306,6 +320,38 @@ def entity(row):
 
 
 def can_finance(user): return FINANCE_MEMBERS or user['role'] == 'admin'
+
+
+def lock_records(c):
+    # All entity writes share a short transaction lock so references cannot move
+    # to another project between validation and commit. SQLite uses BEGIN IMMEDIATE.
+    if DATABASE_URL: c.execute('SELECT pg_advisory_xact_lock(74391003)')
+
+
+def insert_record(c, kind, data, actor):
+    item_id, at = uid(), now()
+    c.execute('INSERT INTO entities VALUES (?,?,?,?,?,?,?,?)', (item_id, kind, json.dumps(data, ensure_ascii=False), 1, at, at, actor, actor))
+    audit(c, actor, '新增', kind, item_id, after=data)
+    return item_id
+
+
+def prepare_record(c, kind, body, user):
+    if kind != 'notes': return validate(kind, body, c)
+    body = dict(body)
+    action = choice(body, 'task_action', ['none', 'link', 'create', 'keep'], 'keep')
+    if action in ('none', 'create'): body['linked_task_id'] = ''
+    if action == 'link' and not body.get('linked_task_id'): fail('请选择要关联的待办')
+    data = validate(kind, body, c)
+    if action == 'create':
+        task = validate('tasks', {
+            'title': text_field(body, 'task_title', 200) or ('跟进：' + data['title'])[:200],
+            'description': '来自笔记：' + data['title'],
+            'project_id': data['project_id'], 'subsection_id': data['subsection_id'],
+            'assignee_id': body.get('task_assignee_id', user['id']),
+            'due_date': body.get('task_due_date', ''), 'status': '待办',
+        }, c)
+        data['linked_task_id'] = insert_record(c, 'tasks', task, user['id'])
+    return data
 
 
 @app.get('/api/state')
@@ -333,10 +379,9 @@ def create_record(kind: str, body: dict, request: Request):
     user = current_user(request)
     if kind == 'transactions' and not can_finance(user): fail('无财务权限', 403)
     with db() as c:
-        data = validate(kind, body, c)
-        item_id, at = uid(), now()
-        c.execute('INSERT INTO entities VALUES (?,?,?,?,?,?,?,?)', (item_id, kind, json.dumps(data, ensure_ascii=False), 1, at, at, user['id'], user['id']))
-        audit(c, user['id'], '新增', kind, item_id, after=data)
+        lock_records(c)
+        data = prepare_record(c, kind, body, user)
+        item_id = insert_record(c, kind, data, user['id'])
         return entity(c.execute('SELECT * FROM entities WHERE id=?', (item_id,)).fetchone())
 
 
@@ -345,11 +390,18 @@ def update_record(kind: str, item_id: str, body: dict, request: Request):
     user = current_user(request)
     if kind == 'transactions' and not can_finance(user): fail('无财务权限', 403)
     with db() as c:
+        lock_records(c)
         row = c.execute('SELECT * FROM entities WHERE id=? AND kind=?', (item_id, kind)).fetchone()
         if not row: fail('记录不存在', 404)
         if body.get('version') != row['version']: fail('其他成员已更新此记录，请刷新后再编辑', 409)
         before = json.loads(row['data'])
-        data = validate(kind, body, c)
+        data = prepare_record(c, kind, {**before, **body}, user)
+        if kind == 'subsections' and data['project_id'] != before['project_id']:
+            fail('分区不能移动到其他项目，请在目标项目新建分区')
+        if kind == 'tasks' and data.get('project_id') != before.get('project_id'):
+            for note in c.execute("SELECT data FROM entities WHERE kind='notes'").fetchall():
+                if json.loads(note['data']).get('linked_task_id') == item_id:
+                    fail('此待办已关联笔记，请先解除关联再更换项目')
         result = c.execute('UPDATE entities SET data=?, version=version+1, updated_at=?, updated_by=? WHERE id=? AND version=?', (json.dumps(data, ensure_ascii=False), now(), user['id'], item_id, row['version']))
         if result.rowcount != 1: fail('记录已被更新，请刷新', 409)
         audit(c, user['id'], '修改', kind, item_id, before, data)
@@ -357,10 +409,10 @@ def update_record(kind: str, item_id: str, body: dict, request: Request):
 
 
 @app.post('/api/upload')
-def upload(request: Request, project_id: str = Form(...), file: UploadFile = File(...)):
+def upload(request: Request, project_id: str = Form(...), file: UploadFile = File(...), subsection_id: str = Form('')):
     user = current_user(request)
     with db() as c:
-        if not c.execute("SELECT id FROM entities WHERE id=? AND kind='projects'", (project_id,)).fetchone(): fail('项目不存在')
+        validate('files', {'title': '附件', 'url': 'https://drive.google.com/', 'project_id': project_id, 'subsection_id': subsection_id}, c)
     creds = [os.getenv(k) for k in ('GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN')]
     if not all(creds): fail('管理员尚未连接 Google Drive。可先添加已有文件链接。', 503)
     content = file.file.read(20 * 1024 * 1024 + 1)
@@ -380,7 +432,7 @@ def upload(request: Request, project_id: str = Form(...), file: UploadFile = Fil
         result.raise_for_status()
     except requests.RequestException: fail('Google Drive 上传失败，请检查授权后重试', 502)
     remote = result.json()
-    return create_record('files', {'title': title, 'url': remote.get('webViewLink') or 'https://drive.google.com/file/d/' + remote['id'] + '/view', 'project_id': project_id}, request)
+    return create_record('files', {'title': title, 'url': remote.get('webViewLink') or 'https://drive.google.com/file/d/' + remote['id'] + '/view', 'project_id': project_id, 'subsection_id': subsection_id}, request)
 
 
 app.mount('/static', StaticFiles(directory=ROOT / 'static'), name='static')
