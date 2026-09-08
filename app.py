@@ -256,16 +256,16 @@ def choice(data, key, choices, default):
     return value
 
 
-def money(data, key, required=False):
+def money(data, key, required=False, signed=False):
     value = data.get(key)
     if value in (None, ''):
         if required: fail('请填写金额')
         return None
     try:
         value = Decimal(str(value))
-        if not value.is_finite() or value < 0 or value > Decimal('999999999999') or value != value.quantize(Decimal('.01')): raise ValueError()
+        if not value.is_finite() or (not signed and value < 0) or abs(value) > Decimal('999999999999') or value != value.quantize(Decimal('.01')): raise ValueError()
         return str(value.quantize(Decimal('.01')))
-    except (InvalidOperation, ValueError): fail('金额须为非负数，最多两位小数')
+    except (InvalidOperation, ValueError): fail('金额最多两位小数' if signed else '金额须为非负数，最多两位小数')
 
 
 def date_field(data, key, required=False):
@@ -359,7 +359,7 @@ def validate(kind, data, c):
         out = {'title': text_field(data, 'title', 120, True), 'description': text_field(data, 'description', 5000), 'project_id': text_field(data, 'project_id', 80, True)}
     elif kind == 'transactions':
         out = {k: text_field(data, k, 2000 if k == 'note' else 150) for k in ['event', 'category', 'payment_method', 'responsible', 'note', 'project_id']}
-        out.update(title=text_field(data, 'title', 200, True), date=date_field(data, 'date', True), direction=choice(data, 'direction', ['收入', '支出'], '支出'), currency=choice(data, 'currency', ['USD', 'CNY'], 'USD'), amount=money(data, 'amount', True), usd_amount=money(data, 'usd_amount'), booked_amount=money(data, 'booked_amount'), payment_status=choice(data, 'payment_status', ['已付', '未付', '部分支付'], '未付'), posting_status=choice(data, 'posting_status', ['平帐', '未入账', '部分入账'], '未入账'))
+        out.update(title=text_field(data, 'title', 200, True), date=date_field(data, 'date'), direction=choice(data, 'direction', ['收入', '支出', '其他'], '支出'), currency=choice(data, 'currency', ['USD', 'CNY'], 'USD'), amount=money(data, 'amount', True), usd_amount=money(data, 'usd_amount'), booked_amount=money(data, 'booked_amount', signed=True), payment_status=choice(data, 'payment_status', ['已付', '未付', '部分支付', '待确认'], '未付'), posting_status=choice(data, 'posting_status', ['平帐', '未入账', '部分入账', '待入账', '待支出'], '未入账'))
         if out['currency'] == 'USD': out['usd_amount'] = out['amount']
         out['profile_id'] = text_field(data, 'profile_id', 80)
         if out['profile_id'] and not c.execute("SELECT id FROM entities WHERE id=? AND kind='finance_profiles'", (out['profile_id'],)).fetchone():
@@ -371,7 +371,7 @@ def validate(kind, data, c):
         out['reimbursement_note'] = text_field(data, 'reimbursement_note', 2000)
         status = out['reimbursement_status']
         claim, paid = Decimal(out['claim_amount'] or '0'), Decimal(out['reimbursed_amount'] or '0')
-        if out['direction'] == '收入' and status != '不需报销': fail('收入不适用报销，请选择不需报销')
+        if out['direction'] != '支出' and status != '不需报销': fail('只有支出适用报销，请选择不需报销')
         if status in ('待确认', '不需报销'):
             if claim or paid or out['reimbursement_date']: fail('请先选择报销状态，再填写报销金额或日期')
         else:
@@ -425,10 +425,10 @@ def lock_records(c):
     if DATABASE_URL: c.execute('SELECT pg_advisory_xact_lock(74391003)')
 
 
-def insert_record(c, kind, data, actor):
+def insert_record(c, kind, data, actor, action='新增'):
     item_id, at = uid(), now()
     c.execute('INSERT INTO entities VALUES (?,?,?,?,?,?,?,?)', (item_id, kind, json.dumps(data, ensure_ascii=False), 1, at, at, actor, actor))
-    audit(c, actor, '新增', kind, item_id, after=data)
+    audit(c, actor, action, kind, item_id, after=data)
     return item_id
 
 
@@ -518,6 +518,9 @@ def update_record(kind: str, item_id: str, body: dict, request: Request):
         if kind == 'products': check_product(c, data, item_id, before)
         if kind == 'stock_movements': check_stock_balance(c, data, item_id)
         if kind == 'transactions':
+            # Import provenance is set only by the administrative importer. A
+            # member can edit the ledger fields, but cannot rewrite the source.
+            if 'source_import' in before: data['source_import'] = before['source_import']
             for movement in c.execute("SELECT data FROM entities WHERE kind='stock_movements'").fetchall():
                 movement = json.loads(movement['data'])
                 if movement.get('linked_transaction_id') == item_id: validate_stock_link(c, movement, data)

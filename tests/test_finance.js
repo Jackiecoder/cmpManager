@@ -27,3 +27,14 @@ test('search and date order define the displayed running balance',()=>{
  assert.deepEqual(data.rows.map(r=>r.id),['a','b']);
  assert.equal(data.balances.b,-3025);
 });
+test('unknown dates sort last and other dealings never count as expenses',()=>{
+ const data=CmpFinance.ledger([
+  {...base,id:'loan',date:'',direction:'其他',amount:'500'},
+  {...base,id:'expense',amount:'30'},
+  {...base,id:'income',direction:'收入',amount:'100'},
+ ]);
+ assert.deepEqual(data.rows.map(r=>r.id),['expense','income','loan']);
+ assert.deepEqual(data.totals.USD,{income:10000,expense:3000,pending:0,unknown:1,other:50000});
+ assert.equal(data.balances.loan,7000);
+ assert.equal(CmpFinance.status(data.rows[2]),'不需报销');
+});
