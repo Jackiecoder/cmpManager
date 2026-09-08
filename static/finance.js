@@ -22,5 +22,28 @@
    }
    return {rows,totals,balances};
  }
- root.CmpFinance = {statuses,status,cents,ledger};
+ function profitSummary(records, profileId='') {
+   // Always use the whole profile. Search and reimbursement filters must not
+   // turn an expense-only view into a misleading profile loss.
+   const rows = records.filter(t => t.kind === 'transactions' && (t.profile_id || '') === profileId
+     && ['收入','支出'].includes(t.direction));
+   const currencies = new Set(rows.map(t => t.currency));
+   const converted = currencies.size > 1;
+   const currency = converted ? 'USD' : (rows[0]?.currency || 'USD');
+   let income = 0, expense = 0, missingConversions = 0;
+   for (const t of rows) {
+     const value = t.currency === currency ? t.amount : t.usd_amount;
+     if (value === null || value === undefined || value === '' || !Number.isFinite(Number(value))) {
+       missingConversions++;
+       continue;
+     }
+     if (t.direction === '收入') income += cents(value);
+     else expense += cents(value);
+   }
+   const net = missingConversions ? null : income - expense;
+   const state = !rows.length ? 'empty' : missingConversions ? 'incomplete'
+     : net > 0 ? 'profit' : net < 0 ? 'loss' : 'balanced';
+   return {currency,converted,count:rows.length,income,expense,net,missingConversions,state};
+ }
+ root.CmpFinance = {statuses,status,cents,ledger,profitSummary};
 })(typeof window === 'undefined' ? globalThis : window);

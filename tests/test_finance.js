@@ -38,3 +38,43 @@ test('unknown dates sort last and other dealings never count as expenses',()=>{
  assert.equal(data.balances.loan,7000);
  assert.equal(CmpFinance.status(data.rows[2]),'不需报销');
 });
+test('profile profit combines recorded conversions and excludes loans and reimbursements',()=>{
+ const records=[
+  {...base,id:'income',profile_id:'club',direction:'收入',amount:'150.10',usd_amount:'999'},
+  {...base,id:'usd-expense',profile_id:'club',amount:'20.20',payment_status:'未付'},
+  {...base,id:'cny-expense',profile_id:'club',currency:'CNY',amount:'100.00',usd_amount:'14.75',
+    reimbursement_status:'已报销',claim_amount:'100.00',reimbursed_amount:'100.00'},
+  {...base,id:'loan',profile_id:'club',direction:'其他',amount:'500'},
+  {...base,id:'other-profile',amount:'9999'},
+ ];
+ assert.deepEqual(CmpFinance.profitSummary(records,'club'),{
+  currency:'USD',converted:true,count:3,income:15010,expense:3495,net:11515,missingConversions:0,state:'profit',
+ });
+ // A filtered detail list must not mutate the whole-profile result.
+ CmpFinance.ledger(records,'club','','支出','已报销');
+ assert.equal(CmpFinance.profitSummary(records,'club').net,11515);
+});
+test('missing conversions prevent an overall profit/loss claim, but zero conversion is valid',()=>{
+ const rows=[{...base,id:'a',direction:'收入',amount:'10'},
+  {...base,id:'b',currency:'CNY',amount:'100',usd_amount:null}];
+ for(const value of [null,undefined,'','invalid']) {
+  rows[1].usd_amount=value;
+  const result=CmpFinance.profitSummary(rows);
+  assert.equal(result.state,'incomplete');assert.equal(result.net,null);assert.equal(result.missingConversions,1);
+ }
+ rows[1].usd_amount='0.00';
+ assert.equal(CmpFinance.profitSummary(rows).net,1000);
+ rows[1].usd_amount='15.00';
+ assert.equal(CmpFinance.profitSummary(rows).state,'loss');
+ assert.equal(CmpFinance.profitSummary(rows).net,-500);
+});
+test('single currency, balanced and empty profiles keep distinct meanings',()=>{
+ const rows=[{...base,id:'a',currency:'CNY',direction:'收入',amount:'0.30'},
+  {...base,id:'b',currency:'CNY',amount:'0.10'},
+  {...base,id:'c',currency:'CNY',amount:'0.20'}];
+ const result=CmpFinance.profitSummary(rows);
+ assert.equal(result.currency,'CNY');assert.equal(result.state,'balanced');assert.equal(result.net,0);
+ assert.equal(result.missingConversions,0);
+ assert.equal(CmpFinance.profitSummary(rows,'empty').state,'empty');
+ assert.equal(CmpFinance.profitSummary([{...base,direction:'其他',amount:'500'}]).state,'empty');
+});

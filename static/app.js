@@ -123,11 +123,23 @@ function sourceLink(source) {
  if(!/^[a-zA-Z0-9_-]+$/.test(source.spreadsheet_id)||!Number.isInteger(source.sheet_id)||!Number.isInteger(source.row))return '';
  return `<p class="hint">导入来源：<a href="https://docs.google.com/spreadsheets/d/${source.spreadsheet_id}/edit#gid=${source.sheet_id}&amp;range=A${source.row}:Q${source.row}" target="_blank" rel="noopener">${esc(sourceLabel(source))}</a></p>`;
 }
+function financeProfitSummary() {
+ const summary=CmpFinance.profitSummary(records,financeProfileId);
+ const label={profit:'当前盈利',loss:'当前亏损',balanced:'收支平衡',empty:'暂无收支',incomplete:'待补全折算'}[summary.state];
+ const incomplete=summary.state==='incomplete', empty=summary.state==='empty';
+ const unit=(summary.converted?'折合 ':'')+summary.currency;
+ return `<section class="profit-summary ${summary.state}" aria-label="账本盈亏">
+   <div class="profit-result"><h2>${label}</h2><strong>${incomplete||empty?'—':cash(summary.net/100,summary.currency)}</strong><span>${esc(unit)} · 账本累计收支</span></div>
+   <dl class="profit-breakdown"><div><dt>${incomplete?'已折算收入':'总收入'}</dt><dd>${cash(summary.income/100,summary.currency)}</dd></div><div><dt>${incomplete?'已折算支出':'总支出'}</dt><dd>${cash(summary.expense/100,summary.currency)}</dd></div></dl>
+   <p class="profit-basis">${empty?'记录收入和支出后自动计算。':incomplete?`${summary.missingConversions} 笔流水缺少美元折算金额，补全后显示整体盈亏。`:`收入减支出，包含未付流水。${summary.converted?'人民币沿用每笔记录的美元折算。':''}`}其他往来与报销不重复计入。${empty?'':'下方筛选不影响此处总额。'}</p>
+ </section>`;
+}
 function financePage() {
  if(!config.finance_access)return empty('暂无财务权限','请联系管理员。');
  const {rows,totals,balances}=CmpFinance.ledger(records,financeProfileId,search,filter,reimbursementFilter);
  const profile=find(financeProfileId);
  return `<div class="finance-profile-bar">${financeProfileSelect(financeProfileId,'finance_profile','财务 Profile / 账本')}<button class="secondary" data-new="finance_profiles">${icon('plus')} 新建账本</button>${profile?`<button class="text-button" data-edit="${profile.id}">编辑账本</button>`:''}</div>${profile?.description?`<p class="finance-profile-description">${esc(profile.description)}</p>`:''}
+ ${financeProfitSummary()}
  ${rows.length?`<div class="ledger-summary">${Object.entries(totals).map(([currency,t])=>`<div class="ledger-currency"><span class="currency-code">${currency}</span><div><small>收入</small><strong class="income">${cash(t.income/100,currency)}</strong></div><div><small>支出</small><strong>${cash(t.expense/100,currency)}</strong></div><div><small>收支净额</small><strong>${cash((t.income-t.expense)/100,currency)}</strong></div><div><small>待报销余额</small><strong>${cash(t.pending/100,currency)}</strong>${t.unknown?`<small>${t.unknown} 笔报销待确认</small>`:''}</div></div>`).join('')}</div>`:''}
  <p class="hint">各币种分别汇总当前筛选，含未付流水；收支净额不代表银行余额。报销只更新原支出，不重复计入收支。待确认记录不计入待报销余额。其他往来不计入收支净额。</p>${Object.entries(totals).filter(([,t])=>t.other).map(([currency,t])=>`<p class="hint">${esc(currency)} 其他往来：${cash(t.other/100,currency)}</p>`).join('')}
  <div class="finance-filters"><input id="search" type="search" placeholder="搜索事项、负责人或备注" aria-label="搜索事项、负责人或备注" value="${esc(search)}"><select id="filter" aria-label="筛选收支与支付"><option value="">全部收支与支付</option>${['收入','支出','其他','已付','未付','部分支付','待确认'].map(x=>`<option ${filter===x?'selected':''}>${x}</option>`).join('')}</select><select id="reimbursement-filter" aria-label="筛选报销状态"><option value="">全部报销状态</option>${CmpFinance.statuses.map(x=>`<option ${reimbursementFilter===x?'selected':''}>${x}</option>`).join('')}</select></div>
