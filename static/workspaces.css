@@ -1,0 +1,10 @@
+.workspace-controls{display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap;margin-bottom:12px}
+.workspace-controls .field{flex:1;max-width:460px;min-width:200px;margin:0}
+.workspace-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.privacy-note{font-size:12px;color:var(--muted);line-height:1.8;margin:0 0 26px;max-width:850px}
+.privacy-note .text-button{font-size:12px;margin-left:8px}
+.maintenance-banner{border-left:4px solid #ae642d;margin-bottom:24px}
+.maintenance-banner button{margin-left:12px}
+.account-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+[hidden]{display:none!important}
+@media(max-width:700px){.workspace-controls .field{max-width:none;flex-basis:100%}.workspace-actions{gap:10px}.privacy-note{margin-bottom:20px}.account-actions{width:100%;justify-content:flex-start}.user-row:has(.account-actions){flex-wrap:wrap}.maintenance-banner button{display:block;margin:8px 0 0}}

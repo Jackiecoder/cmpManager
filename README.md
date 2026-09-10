@@ -2,7 +2,9 @@
 
 Kevin 与 5 位成员共用的手机优先公司管理应用。支持财务流水、项目进度、客户沟通笔记、待办、Google Drive 附件及逐条修改历史。
 
-- 所有成员可操作财务；管理员负责创建、停用账号和重置密码。
+- 每个账号都有独立个人空间，可记录个人项目、待办、笔记、财务和库存；登录后默认进入个人工作台。顶部可切换到已加入的团队。现有业务记录保留在 C&K Commerce 团队，Kevin 是 Owner，旧成员初始保留 Editor 权限。
+- 团队支持 Owner / Editor / Viewer：Owner 管理成员，Editor 可读写财务及其他业务数据，Viewer 只读。Kevin 作为平台管理员管理账号，但管理员身份本身不授予其他人的个人内容访问权。密码只保存不可逆哈希，管理员可重置初始密码，不能查看成员当前密码。
+- 管理员可通过“只读数据维护”入口重新验证自己的密码、填写原因后，限时 15 分钟查看一个成员的个人空间。权限绑定当前登录会话，不允许修改；每次读取、开始和结束都会记录在该个人空间。成员在“账号安全与维护记录”中可查看并随时结束访问。界面明确披露这一例外，避免把应用级隔离误称为端到端加密。
 - 每个项目可以建立分区，例如“店家联系”“工厂一联系”；沟通笔记、待办、附件和收支可以分别归类，旧记录保留在“未分区”。
 - 项目详情以沟通时间线展示进展，按笔记日期倒序排列，分区使用固定的不同颜色。新增笔记默认加入时间线，可取消或在编辑时重新加入；不加入时间线的笔记仍保留在沟通笔记列表中。
 - 保存沟通笔记时可以只保存笔记、关联同一项目的已有待办，或同时创建并关联一个默认待办。默认待办会继承项目和分区，标题默认为“跟进：笔记标题”，负责人默认为当前成员，截止日可留空。
@@ -35,6 +37,7 @@ export ADMIN_INITIAL_PASSWORD='replace-with-a-long-random-password'
 .venv/bin/pip install pytest httpx
 .venv/bin/python -m pytest -q
 node --check static/app.js
+node --check static/workspaces.js
 node --test tests/test_timeline.js tests/test_finance.js tests/test_inventory.js
 ```
 
@@ -58,6 +61,8 @@ export DRIVE_FOLDER_ID=your-google-drive-folder
 
 脚本只部署 `cmpmanager`，使用 0–2 个实例；全部业务状态在 PostgreSQL 中。登录页面可公开访问，业务 API 必须登录。部署后验证 `/api/healthz`、`/api/me` 未登录返回 401、Cloud Run serving revision 和 SQL 持久化。对数据库使用 Cloud SQL 自动备份；不要将 `.local`、凭据或真实流水放入镜像。
 
+首次升级自动为旧实体和日志加入 `workspace_id`，创建团队与每个用户的个人空间；不会重写业务内容、版本、密码或历史署名。账号安全日志与团队日志分离。迁移有持久化标记，重启不会把已移出的成员重新加入团队。生产的 entities/audit 表强制启用行级隔离（FORCE RLS），配合应用逐次校验成员角色；没有显式空间上下文的旧连接只可见 company 记录。升级需使用表所有者运行迁移，并在发布前备份该数据库。
+
 ## Google Drive 上传
 
 直接上传需要用户 OAuth 授权。个人 My Drive 文件夹不能靠服务账号拥有新文件。配置三个环境变量，敏感值使用 Secret Manager：
@@ -79,6 +84,7 @@ export DRIVE_FOLDER_ID=your-google-drive-folder
 - 状态接口一次返回全部业务记录；当前针对 6 人小团队。数据规模扩大后应增加分页和归档查询。
 - 库存当前按商品和仓库管理，不做批次/保质期、仓库调拨单、预占库存或自动成本核算。一个商品使用一个固定单位；不同包装单位可建立不同 SKU。
 - 附件在 Drive 创建成功而数据库写入失败时，文件可能已保留在目标文件夹；可从文件夹查找并补录链接。
+- 公司 Drive 直接上传仅用于 C&K Commerce 团队。个人空间和新团队可添加自行管理权限的 Drive 链接；应用权限不会改变 Drive 文件本身的共享设置，不能将公司共享文件夹作为个人私密存储。
 
 详细需求及设计记录见 [docs/product.md](docs/product.md)。
 

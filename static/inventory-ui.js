@@ -63,6 +63,7 @@ function stockAvailability() {
  $('#stock-availability').textContent=product?`当前库存：${CmpInventory.format(amount/1000)} ${find(product)?.unit||''}；修改流水会重新计算余额。`:'请选择商品和仓库。';
 }
 function inventoryEditor(kind,id,preset={}) {
+ if(!canEdit()){readOnlyRecord(id);return;}
  const record=id?find(id):null;
  const data=record||{warehouse_id:warehouseId,product_id:stockProductFilter,project_id:projectId||'',subsection_id:subsectionId==='unassigned'?'':subsectionId,date:today(),movement_type:'采购入库',unit:'件',low_stock:'0',...preset};
  let content='';

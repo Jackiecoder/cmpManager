@@ -75,7 +75,7 @@ def test_import_atomic_idempotent_and_source_immutable(client):
         retry = import_ledger(c, rows, 'Test profile', 'kevin', apply=True)
     assert retry['new'] == 0 and retry['skipped'] == 3
     assert next(t for t in client.get('/api/state').json()['records'] if t['title'] == 'Supplies')['note'] == 'Actual update'
-    assert len(client.get('/api/activity').json()) == 6  # password + profile + 3 imports + edit
+    assert len(client.get('/api/activity').json()) == 5  # profile + 3 imports + edit; password events are account-private
     # A source revision is a review conflict, never an automatic overwrite.
     changed = copy.deepcopy(rows)
     changed[0]['source_import']['sha256'] = 'changed'

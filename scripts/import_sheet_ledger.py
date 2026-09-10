@@ -130,11 +130,11 @@ def import_ledger(c, rows, profile_title, actor_username, apply=False):
     if not user or not user['active'] or user['role'] != 'admin':
         raise ValueError('Import requires an existing active administrator')
     title = app.text_field({'title': profile_title}, 'title', 120, True)
-    profiles = [app.entity(r) for r in c.execute("SELECT * FROM entities WHERE kind='finance_profiles'").fetchall()]
+    profiles = [app.entity(r) for r in c.records("kind='finance_profiles'").fetchall()]
     matches = [p for p in profiles if p['title'] == title]
     if len(matches) > 1: raise ValueError('Ambiguous target profile name')
     profile_id = matches[0]['id'] if matches else ''
-    existing = [app.entity(r) for r in c.execute("SELECT * FROM entities WHERE kind='transactions'").fetchall()]
+    existing = [app.entity(r) for r in c.records("kind='transactions'").fetchall()]
     sources = {}
     native = {signature(r) for r in existing if r.get('profile_id', '') == profile_id and not source_key(r)} if profile_id else set()
     for record in existing:
