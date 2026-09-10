@@ -18,7 +18,7 @@ function inventoryPage() {
  <div class="inventory-totals"><span><strong>${products.filter(p=>(balances[p.id]||0)>0).length}</strong>种商品有库存</span><span><strong>${low.length}</strong>种达到库存提醒线</span><span><strong>${byKind('stock_movements').filter(m=>m.warehouse_id===warehouseId).length}</strong>笔出入库</span></div>
  <nav class="detail-tabs" aria-label="库存内容"><button data-inventory-tab="balances" class="${inventoryTab==='balances'?'active':''}">库存余额</button><button data-inventory-tab="movements" class="${inventoryTab==='movements'?'active':''}">出入库流水</button></nav>
  <div class="finance-filters inventory-filters"><input id="search" type="search" placeholder="搜索商品、SKU 或流水" aria-label="搜索商品、SKU 或流水" value="${esc(search)}">${stockProductSelect(stockProductFilter,'stock_product_filter',false)}</div>
- <p class="hint">余额由当前仓库的全部出入库计算。商品按各自单位计量；期初库存通过“期初入库”录入，盘点差异通过盘盈或盘亏记录。</p>
+ <p class="hint">${config.full_access?'余额由当前仓库的全部出入库计算。':'这里只汇总已授权项目的出入库，不代表整个仓库的可用库存。'}商品按各自单位计量；期初库存通过“期初入库”录入，盘点差异通过盘盈或盘亏记录。</p>
  ${!products.length?`<div class="panel">${empty('先建立商品档案','填写商品名称、SKU 和计量单位，再录入期初库存或采购入库。','new-product','新建商品','inventory')}</div>`:inventoryTab==='movements'?`<div class="panel">${moves.length?stockMovementList(moves):empty('暂无出入库记录','记录每次采购、销售、领用或盘点调整。','new-stock','记录出入库','inventory')}</div>`:
  visible.length?`<div class="ledger-scroll" role="region" aria-label="库存余额表" tabindex="0"><table class="ledger-table"><thead><tr>${['商品','库存数量','SKU','提醒线','状态','操作'].map(x=>`<th scope="col">${x}</th>`).join('')}</tr></thead><tbody>${visible.map(p=>`<tr><td><button class="text-button" data-edit="${p.id}">${esc(p.title)}</button></td><td class="numeric"><span class="stock-quantity">${CmpInventory.format((balances[p.id]||0)/1000)}</span> ${esc(p.unit)}</td><td>${esc(p.sku)}</td><td class="numeric">${CmpInventory.format(p.low_stock)} ${esc(p.unit)}</td><td>${(balances[p.id]||0)<=CmpInventory.milli(p.low_stock)?'<span class="stock-low">库存偏低</span>':'正常'}</td><td><div class="stock-links"><button class="text-button" data-stock-in="${p.id}">入库</button><button class="text-button" data-stock-out="${p.id}">出库</button><button class="text-button" data-stock-ledger="${p.id}">流水</button></div></td></tr>`).join('')}</tbody></table></div>`:`<div class="panel">${empty('没有匹配的商品','调整搜索或商品筛选后重试。')}</div>`}`;
 }
@@ -60,10 +60,10 @@ function stockAvailability() {
  const product=$('#editor [name=product_id]')?.value, warehouse=$('#editor [name=warehouse_id]')?.value;
  if(!$('#stock-availability'))return;
  const amount=CmpInventory.balances(records,warehouse)[product]||0;
- $('#stock-availability').textContent=product?`当前库存：${CmpInventory.format(amount/1000)} ${find(product)?.unit||''}；修改流水会重新计算余额。`:'请选择商品和仓库。';
+ $('#stock-availability').textContent=product?`${config.full_access?'当前库存':'已授权项目净变动'}：${CmpInventory.format(amount/1000)} ${find(product)?.unit||''}；修改流水会重新计算余额。`:'请选择商品和仓库。';
 }
 function inventoryEditor(kind,id,preset={}) {
- if(!canEdit()){readOnlyRecord(id);return;}
+ if(!(id?canEdit(id):canCreate(kind))){readOnlyRecord(id);return;}
  const record=id?find(id):null;
  const data=record||{warehouse_id:warehouseId,product_id:stockProductFilter,project_id:projectId||'',subsection_id:subsectionId==='unassigned'?'':subsectionId,date:today(),movement_type:'采购入库',unit:'件',low_stock:'0',...preset};
  let content='';
@@ -71,7 +71,7 @@ function inventoryEditor(kind,id,preset={}) {
  if(kind==='products')content=field('title','商品名称',data.title,'text','required maxlength="120"')+field('sku','商品编号 / SKU',data.sku,'text','required maxlength="80"')+field('unit','计量单位',data.unit,'text','required maxlength="20" placeholder="件、箱、kg…"')+field('low_stock','低库存提醒线',data.low_stock,'number','min="0" step="0.001" required')+area('description','规格 / 商品说明',data.description);
  if(kind==='stock_movements') {
    if(!byKind('products').length){toast('请先新建商品');inventoryEditor('products');return;}
-   content=field('title','流水标题',data.title,'text','required maxlength="200" placeholder="例如：样品到货、客户订单出库"')+stockProductSelect(data.product_id)+warehouseSelect(data.warehouse_id)+select('movement_type','出入库类型',Object.keys(CmpInventory.types),data.movement_type)+field('date','出入库日期',data.date,'date','required')+field('quantity','数量（按商品单位）',data.quantity,'number','min="0.001" step="0.001" required')+'<p class="stock-availability wide" id="stock-availability"></p>'+projectSelect(data.project_id)+sectionSelect(data.project_id,data.subsection_id)+area('note','备注 / 单据号',data.note)+stockFinanceControls(data);
+   content=field('title','流水标题',data.title,'text','required maxlength="200" placeholder="例如：样品到货、客户订单出库"')+stockProductSelect(data.product_id)+warehouseSelect(data.warehouse_id)+select('movement_type','出入库类型',Object.keys(CmpInventory.types),data.movement_type)+field('date','出入库日期',data.date,'date','required')+field('quantity','数量（按商品单位）',data.quantity,'number','min="0.001" step="0.001" required')+'<p class="stock-availability wide" id="stock-availability"></p>'+projectSelect(data.project_id,!config.full_edit)+sectionSelect(data.project_id,data.subsection_id)+area('note','备注 / 单据号',data.note)+stockFinanceControls(data);
  }
  openModal((id?'编辑':'新增')+kindLabels[kind],formWrap(content)+(record?`<p class="hint">${esc(person(record.updated_by))} · ${formatTime(record.updated_at)} <button class="text-button" data-history="${id}">修改记录</button></p>`:''));
  if(kind==='stock_movements'){syncStockFinance();stockAvailability();}

@@ -78,11 +78,12 @@ def test_legacy_payment_never_implies_reimbursement(client):
 
 def test_member_can_manage_profile_and_reimbursement(client):
     ready(client)
-    client.post('/api/users',json={'name':'Member','username':'member','password':'member-password-123!'})
+    member=client.post('/api/users',json={'name':'Member','username':'member','password':'member-password-123!'}).json()
+    profile=client.post('/api/records/finance_profiles',json={'title':'Member ledger','member_access':[{'user_id':member['id'],'role':'editor'}]})
     login(client,'member','member-password-123!')
     client.post('/api/password',json={'current_password':'member-password-123!','password':'changed-member-123!'})
     login(client,'member','changed-member-123!')
-    profile=client.post('/api/records/finance_profiles',json={'title':'Member ledger'})
+    assert client.post('/api/records/finance_profiles',json={'title':'forbidden'}).status_code==403
     assert profile.status_code==200
     t=expense(client,profile_id=profile.json()['id'],currency='CNY',reimbursement_status='已报销',claim_amount='80',reimbursed_amount='80')
     assert t.status_code==200

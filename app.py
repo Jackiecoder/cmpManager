@@ -34,15 +34,18 @@ class DB:
     def __init__(self, conn):
         self.conn = conn
         self.workspace_id = COMPANY_SPACE
+        self.access = None
     def execute(self, sql, params=()):
         return self.conn.execute(sql.replace('?', '%s') if DATABASE_URL else sql, params)
 
     def scope(self, workspace_id):
         self.workspace_id = workspace_id
-        if DATABASE_URL: self.execute("SELECT set_config('cmp.workspace_id', ?, true)", (workspace_id,))
+        if DATABASE_URL:
+            self.execute("SELECT set_config('cmp.workspace_id', ?, true), set_config('cmp.access_version','2',true)", (workspace_id,))
 
-    def records(self, where='1=1', params=(), columns='*', order=''):
-        return self.execute(f'SELECT {columns} FROM entities WHERE workspace_id=? AND ({where})' + (f' ORDER BY {order}' if order else ''), (self.workspace_id, *params))
+    def records(self, where='1=1', params=(), columns='*', order='', internal=False):
+        clause, access_params = resource_filter(self) if not internal else ('1=1', ())
+        return self.execute(f'SELECT {columns} FROM entities WHERE workspace_id=? AND ({where}) AND ({clause})' + (f' ORDER BY {order}' if order else ''), (self.workspace_id, *params, *access_params))
 
 
 @contextmanager
@@ -107,6 +110,7 @@ def initialize():
             if not password or len(password) < 12: raise RuntimeError('Set ADMIN_INITIAL_PASSWORD to at least 12 characters for first startup')
             c.execute('INSERT INTO users VALUES (?,?,?,?,?,?,?)', (uid(), 'kevin', 'Kevin', 'admin', password_hash(password), 1, 1))
         migrate_workspaces(c)
+        migrate_resource_access(c)
 
 
 def personal_space(user_id): return 'personal:' + user_id
@@ -151,10 +155,125 @@ def migrate_workspaces(c):
                 c.execute(f"CREATE POLICY workspace_isolation ON {table} USING (workspace_id=COALESCE(NULLIF(current_setting('cmp.workspace_id',true),''),'company')) WITH CHECK (workspace_id=COALESCE(NULLIF(current_setting('cmp.workspace_id',true),''),'company'))")
 
 
+def migrate_resource_access(c):
+    c.execute('''CREATE TABLE IF NOT EXISTS resource_access (
+        workspace_id TEXT NOT NULL, resource_kind TEXT NOT NULL, resource_id TEXT NOT NULL,
+        user_id TEXT NOT NULL, role TEXT NOT NULL, version INTEGER NOT NULL, updated_at TEXT NOT NULL,
+        PRIMARY KEY(workspace_id,resource_kind,resource_id,user_id))''')
+    if not c.execute("SELECT name FROM app_migrations WHERE name='resource-access-v2'").fetchone():
+        c.execute("UPDATE memberships SET role='member',version=version+1,updated_at=? WHERE role IN ('editor','viewer')", (now(),))
+        c.execute('INSERT INTO app_migrations VALUES (?,?)', ('resource-access-v2', now()))
+    if DATABASE_URL:
+        # Old revisions don't implement resource authorization. Fail closed if
+        # one receives a request during rollout; new connections set version 2.
+        for table in ('entities', 'audit'):
+            c.execute(f"ALTER POLICY workspace_isolation ON {table} USING (workspace_id=COALESCE(NULLIF(current_setting('cmp.workspace_id',true),''),'company') AND current_setting('cmp.access_version',true)='2') WITH CHECK (workspace_id=COALESCE(NULLIF(current_setting('cmp.workspace_id',true),''),'company') AND current_setting('cmp.access_version',true)='2')")
+
+
+def configure_access(c, user, workspace, role):
+    full = workspace['kind'] == 'personal' or role in ('owner', 'admin')
+    grants = c.execute("SELECT resource_kind,resource_id,role FROM resource_access WHERE workspace_id=? AND user_id=? AND role IN ('viewer','editor')", (workspace['id'], user['id'])).fetchall()
+    c.access = {'full': full, 'readonly': role == 'viewer', 'user_id': user['id'],
+                'projects': {}, 'finance_profiles': {}}
+    for grant in grants: c.access[grant['resource_kind']][grant['resource_id']] = grant['role']
+
+
+def resource_filter(c):
+    access = c.access
+    if access is None or access['full']: return '1=1', ()
+    project_ids, ledger_ids = list(access['projects']), list(access['finance_profiles'])
+    def value(key):
+        return f"COALESCE(data::jsonb->>'{key}','')" if DATABASE_URL else f"COALESCE(json_extract(data,'$.{key}'),'')"
+    def inside(expression, values):
+        return (f"{expression} IN ({','.join('?' for _ in values)})", values) if values else ('0=1', [])
+    clauses, params = [], []
+    for kind, expr, ids in [('projects', 'id', project_ids), ('finance_profiles', 'id', ledger_ids), ('transactions', value('profile_id'), ledger_ids)]:
+        sql, args = inside(expr, ids);clauses.append(f"(kind='{kind}' AND {sql})");params.extend(args)
+    sql, args = inside(value('project_id'), project_ids)
+    clauses.append(f"(kind IN ('notes','files','subsections','stock_movements') AND {sql})");params.extend(args)
+    ledger_task = f"({value('profile_id')}!='' OR CAST({value('ledger_task')} AS TEXT) IN ('true','1'))"
+    sql, args = inside(value('profile_id'), ledger_ids)
+    clauses.append(f"(kind='tasks' AND {ledger_task} AND {sql})");params.extend(args)
+    sql, args = inside(value('project_id'), project_ids)
+    clauses.append(f"(kind='tasks' AND NOT {ledger_task} AND {sql})");params.extend(args)
+    # Shared catalog carries no stock quantities. Movements remain project-scoped.
+    if project_ids: clauses.append("kind IN ('products','warehouses')")
+    return ' OR '.join(clauses), tuple(params)
+
+
+def record_resource(kind, data, item_id=''):
+    if kind in ('projects', 'finance_profiles'): return kind, item_id
+    if kind == 'transactions' or (kind == 'tasks' and (data.get('ledger_task') or data.get('profile_id'))):
+        return 'finance_profiles', data.get('profile_id', '')
+    if kind in ('notes', 'files', 'subsections', 'tasks', 'stock_movements') and data.get('project_id'):
+        return 'projects', data['project_id']
+    return None, ''
+
+
+def record_role(c, kind, data, item_id=''):
+    if c.access is None: return 'editor'
+    if c.access['full']: return 'viewer' if c.access['readonly'] else 'editor'
+    resource, key = record_resource(kind, data, item_id)
+    if resource: return c.access[resource].get(key)
+    if kind in ('products', 'warehouses') and c.access['projects']: return 'viewer'
+    return None
+
+
+def authorize_record(c, kind, data, item_id='', write=False, creating=False):
+    if c.access is None: return
+    if creating and kind in ('projects', 'finance_profiles', 'products', 'warehouses') and not c.access['full']:
+        fail('只有公司 Admin 可以创建项目、账本和库存档案', 403)
+    role = record_role(c, kind, data, item_id)
+    if not role or (write and role != 'editor'): fail('没有此项目或账本的操作权限', 403)
+
+
+def reference_record(c, key, item_id, kind):
+    existing_kind, existing_data = getattr(c, 'existing', (None, {}))
+    # A ledger editor may retain an existing opaque project association without
+    # obtaining project access; they cannot replace it with an unauthorized one.
+    retained = existing_kind in ('transactions', 'stock_movements') and existing_data.get(key) == item_id
+    return c.records('id=? AND kind=?', (item_id, kind), internal=retained).fetchone()
+
+
+def present_record(c, row):
+    record = entity(row)
+    record['_access'] = record_role(c, row['kind'], record, row['id'])
+    return record
+
+
+def resource_target(c, kind, resource_id):
+    if kind not in ('projects', 'finance_profiles'): fail('权限对象必须是项目或账本', 400)
+    if kind == 'finance_profiles' and resource_id == 'default': return ''
+    if not c.records('id=? AND kind=?', (resource_id, kind), columns='id').fetchone(): fail('项目或账本不存在', 404)
+    return resource_id
+
+
+def apply_resource_members(c, actor, kind, resource_id, changes):
+    require_team_owner(c, c.workspace_id, actor)
+    if not isinstance(changes, list) or len(changes) > 6: fail('成员权限格式无效')
+    seen = set()
+    for change in changes:
+        if not isinstance(change, dict): fail('成员权限格式无效')
+        member_id = text_field(change, 'user_id', 80, True)
+        if member_id in seen: fail('成员重复')
+        seen.add(member_id)
+        role = choice(change, 'role', ['viewer', 'editor', 'removed'], 'editor')
+        member = c.execute("SELECT m.role,u.name,u.active FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.workspace_id=? AND m.user_id=? AND m.role IN ('owner','admin','member')", (c.workspace_id, member_id)).fetchone()
+        if not member or not member['active']: fail('请先将该账号加入公司并启用')
+        if member['role'] in ('owner', 'admin'): fail('公司 Admin 已有全部权限，无需单独分配')
+        before = c.execute('SELECT role,version FROM resource_access WHERE workspace_id=? AND resource_kind=? AND resource_id=? AND user_id=?', (c.workspace_id, kind, resource_id, member_id)).fetchone()
+        if 'version' in change and change['version'] != (before['version'] if before else 0): fail('权限已更新，请刷新后再操作', 409)
+        version = before['version'] + 1 if before else 1
+        c.execute('''INSERT INTO resource_access VALUES (?,?,?,?,?,?,?) ON CONFLICT(workspace_id,resource_kind,resource_id,user_id)
+            DO UPDATE SET role=excluded.role,version=excluded.version,updated_at=excluded.updated_at''', (c.workspace_id, kind, resource_id, member_id, role, version, now()))
+        after = {'resource_kind': kind, 'resource_id': resource_id, 'user_id': member_id, 'name': member['name'], 'role': role, 'version': version}
+        audit(c, actor['id'], '移除访问权限' if role == 'removed' else '分配访问权限', 'resource_access', resource_id, {**dict(before), 'resource_kind': kind, 'resource_id': resource_id, 'name': member['name']} if before else None, after)
+
+
 def accessible_spaces(c, user):
     return [dict(r) for r in c.execute('''SELECT w.*, CASE WHEN w.kind='personal' THEN 'owner' ELSE m.role END AS access
         FROM workspaces w LEFT JOIN memberships m ON m.workspace_id=w.id AND m.user_id=?
-        WHERE (w.kind='personal' AND w.owner_id=?) OR (w.kind='team' AND m.role IN ('owner','editor','viewer'))
+        WHERE (w.kind='personal' AND w.owner_id=?) OR (w.kind='team' AND m.role IN ('owner','admin','member'))
         ORDER BY w.kind, w.created_at''', (user['id'], user['id'])).fetchall()]
 
 
@@ -165,7 +284,10 @@ def scope_request(c, request, user, write=False):
     if requested == 'personal': requested = personal_space(user['id'])
     if not requested:
         member = c.execute('SELECT role FROM memberships WHERE workspace_id=? AND user_id=?', (COMPANY_SPACE, user['id'])).fetchone()
-        requested = COMPANY_SPACE if member and member['role'] != 'removed' else personal_space(user['id'])
+        if member and member['role'] != 'removed': requested = COMPANY_SPACE
+        else:
+            joined = c.execute("SELECT w.id FROM workspaces w JOIN memberships m ON m.workspace_id=w.id AND m.user_id=? WHERE w.kind='team' AND m.role IN ('owner','admin','member') ORDER BY w.created_at,w.id LIMIT 1", (user['id'],)).fetchone()
+            requested = joined['id'] if joined else personal_space(user['id'])
     workspace = c.execute('SELECT * FROM workspaces WHERE id=?', (requested,)).fetchone()
     if not workspace: fail('无权访问此空间', 403)
     workspace = dict(workspace)
@@ -173,7 +295,7 @@ def scope_request(c, request, user, write=False):
     if workspace['kind'] == 'personal' and workspace['owner_id'] == user['id']: access = 'owner'
     elif workspace['kind'] == 'team':
         member = c.execute('SELECT role FROM memberships WHERE workspace_id=? AND user_id=?', (requested, user['id'])).fetchone()
-        if member and member['role'] in ('owner', 'editor', 'viewer'): access = member['role']
+        if member and member['role'] in ('owner', 'admin', 'member'): access = member['role']
     maintenance = None
     if not access and workspace['kind'] == 'personal' and user['role'] == 'admin':
         grant_id = request.headers.get('x-cmp-maintenance', '')
@@ -183,14 +305,15 @@ def scope_request(c, request, user, write=False):
     if not access: fail('无权访问此空间', 403)
     if write and access == 'viewer': fail('当前空间为只读权限，不能修改记录', 403)
     c.scope(requested)
+    configure_access(c, user, workspace, access)
     if maintenance:
         audit(c, user['id'], '维护读取', 'maintenance', maintenance['id'], after={'reason': maintenance['reason'], 'path': request.url.path})
     return {**workspace, 'access': access, 'maintenance': bool(maintenance), 'maintenance_expires': maintenance['expires'] if maintenance else None}
 
 
 def require_team_owner(c, workspace_id, user):
-    workspace = c.execute("SELECT * FROM workspaces WHERE id=? AND kind='team' AND owner_id=?", (workspace_id, user['id'])).fetchone()
-    if not workspace: fail('只有此团队的 owner 可以管理成员', 403)
+    workspace = c.execute("SELECT w.* FROM workspaces w JOIN memberships m ON m.workspace_id=w.id AND m.user_id=? WHERE w.id=? AND w.kind='team' AND m.role IN ('owner','admin')", (user['id'], workspace_id)).fetchone()
+    if not workspace: fail('只有此公司的 Admin 可以管理成员和权限', 403)
     c.scope(workspace_id)
     return workspace
 
@@ -200,7 +323,7 @@ def scope_roster(c):
     if workspace['kind'] == 'personal':
         return [clean_user(r) for r in c.execute('SELECT * FROM users WHERE id=?', (workspace['owner_id'],)).fetchall()]
     return [{**clean_user(r), 'team_role': r['team_role'], 'membership_version': r['membership_version']} for r in c.execute('''SELECT u.*, m.role AS team_role, m.version AS membership_version FROM users u JOIN memberships m ON m.user_id=u.id
-        WHERE m.workspace_id=? AND m.role IN ('owner','editor','viewer') ORDER BY u.name''', (c.workspace_id,)).fetchall()]
+        WHERE m.workspace_id=? AND m.role IN ('owner','admin','member') ORDER BY u.name''', (c.workspace_id,)).fetchall()]
 
 
 @asynccontextmanager
@@ -347,7 +470,7 @@ def create_user(body: dict, request: Request):
         c.execute('INSERT INTO users VALUES (?,?,?,?,?,?,?)', (item['id'], username, name, 'member', password_hash(password), 1, 1))
         create_personal_space(c, item['id'])
         audit(c, user['id'], '创建账号', 'user', item['id'], after=item)
-        team_role = choice(body, 'team_role', ['none', 'viewer', 'editor'], 'editor')
+        team_role = choice(body, 'team_role', ['none', 'member', 'admin'], 'member')
         if team_role != 'none':
             team_id = body.get('team_id') or COMPANY_SPACE
             require_team_owner(c, team_id, user)
@@ -400,7 +523,7 @@ def create_team(body: dict, request: Request):
 def team_members(team_id: str, request: Request):
     user = current_user(request)
     with db() as c:
-        member = c.execute("SELECT role FROM memberships WHERE workspace_id=? AND user_id=? AND role IN ('owner','editor','viewer')", (team_id, user['id'])).fetchone()
+        member = c.execute("SELECT role FROM memberships WHERE workspace_id=? AND user_id=? AND role IN ('owner','admin','member')", (team_id, user['id'])).fetchone()
         if not member: fail('无权访问此团队', 403)
         c.scope(team_id)
         return scope_roster(c)
@@ -409,7 +532,7 @@ def team_members(team_id: str, request: Request):
 @app.post('/api/teams/{team_id}/members')
 def add_team_member(team_id: str, body: dict, request: Request):
     user = current_user(request)
-    role = choice(body, 'role', ['viewer', 'editor'], 'viewer')
+    role = choice(body, 'role', ['member', 'admin'], 'member')
     username = text_field(body, 'username', 40, True).lower()
     with db() as c:
         lock_records(c); require_team_owner(c, team_id, user)
@@ -428,7 +551,7 @@ def add_team_member(team_id: str, body: dict, request: Request):
 @app.patch('/api/teams/{team_id}/members/{member_id}')
 def update_team_member(team_id: str, member_id: str, body: dict, request: Request):
     user = current_user(request)
-    role = choice(body, 'role', ['viewer', 'editor', 'removed'], 'viewer')
+    role = choice(body, 'role', ['member', 'admin', 'removed'], 'member')
     with db() as c:
         lock_records(c); require_team_owner(c, team_id, user)
         before = c.execute('SELECT role,version FROM memberships WHERE workspace_id=? AND user_id=?', (team_id, member_id)).fetchone()
@@ -436,6 +559,11 @@ def update_team_member(team_id: str, member_id: str, body: dict, request: Reques
         if before['role'] == 'owner': fail('不能修改团队 owner 的权限')
         if before['version'] != body.get('version'): fail('权限已被更新，请刷新后再编辑', 409)
         c.execute('UPDATE memberships SET role=?,version=version+1,updated_at=? WHERE workspace_id=? AND user_id=?', (role, now(), team_id, member_id))
+        if role == 'removed':
+            revoked = c.execute("SELECT * FROM resource_access WHERE workspace_id=? AND user_id=? AND role!='removed'", (team_id, member_id)).fetchall()
+            for grant in revoked:
+                audit(c, user['id'], '移出公司撤销访问', 'resource_access', grant['resource_id'], dict(grant), {**dict(grant), 'role': 'removed', 'version': grant['version'] + 1})
+            c.execute("UPDATE resource_access SET role='removed',version=version+1,updated_at=? WHERE workspace_id=? AND user_id=? AND role!='removed'", (now(), team_id, member_id))
         name = c.execute('SELECT name FROM users WHERE id=?', (member_id,)).fetchone()['name']
         after = {'name': name, 'role': role, 'version': before['version'] + 1}
         audit(c, user['id'], '移出团队' if role == 'removed' else '修改团队权限', 'membership', member_id, {**dict(before), 'name': name}, after)
@@ -584,7 +712,7 @@ def check_stock_balance(c, data, exclude_id=None):
     # Rebuild affected warehouse/product balances by day. The caller holds the
     # global transaction lock, including while linked finance and audit are saved.
     affected = {(data['warehouse_id'], data['product_id'])}
-    rows = c.records("kind='stock_movements'", columns='id, data').fetchall()
+    rows = c.records("kind='stock_movements'", columns='id, data', internal=True).fetchall()
     for row in rows:
         if row['id'] == exclude_id:
             old = json.loads(row['data'])
@@ -599,7 +727,8 @@ def check_stock_balance(c, data, exclude_id=None):
         balance = Decimal('0')
         for day in sorted(daily):
             balance += daily[day]
-            if balance < 0: fail(f'库存不足：这次操作会使 {day} 的库存低于零，请核对入库和出库记录')
+            if balance < 0:
+                fail(f'库存不足：这次操作会使 {day} 的库存低于零，请核对入库和出库记录' if c.access is None or c.access['full'] else '库存不足，请联系公司 Admin 核对仓库库存')
 
 
 def validate(kind, data, c):
@@ -615,7 +744,7 @@ def validate(kind, data, c):
         if not c.records("id=? AND kind='products'", (out['product_id'],), columns='id').fetchone(): fail('商品不存在')
         if out['warehouse_id'] and not c.records("id=? AND kind='warehouses'", (out['warehouse_id'],), columns='id').fetchone(): fail('仓库不存在')
         if out['linked_transaction_id']:
-            transaction = c.records("id=? AND kind='transactions'", (out['linked_transaction_id'],), columns='data').fetchone()
+            transaction = reference_record(c, 'linked_transaction_id', out['linked_transaction_id'], 'transactions')
             if not transaction: fail('关联财务记录不存在')
             validate_stock_link(c, out, json.loads(transaction['data']))
     elif kind == 'finance_profiles':
@@ -655,17 +784,22 @@ def validate(kind, data, c):
         out = {'title': text_field(data, 'title', 200, True), 'body': text_field(data, 'body', 20000, True), 'contact': text_field(data, 'contact', 150), 'date': date_field(data, 'date', True), 'project_id': text_field(data, 'project_id', 80, True)}
     elif kind == 'tasks':
         out = {'title': text_field(data, 'title', 200, True), 'description': text_field(data, 'description', 5000), 'project_id': text_field(data, 'project_id', 80), 'assignee_id': text_field(data, 'assignee_id', 80), 'due_date': date_field(data, 'due_date'), 'status': choice(data, 'status', ['待办', '进行中', '已完成'], '待办')}
+        out['profile_id'] = text_field(data, 'profile_id', 80)
+        if not isinstance(data.get('ledger_task', False), bool): fail('账本待办标记须为是或否')
+        out['ledger_task'] = bool(data.get('ledger_task', False) or out['profile_id'])
+        if out['ledger_task'] and out['project_id']: fail('待办请选择项目或账本作为归属，不可同时选择')
+        if out['profile_id'] and not c.records("id=? AND kind='finance_profiles'", (out['profile_id'],), columns='id').fetchone(): fail('财务账本不存在或无权访问')
     elif kind == 'files':
         url = text_field(data, 'url', 2000, True)
         parsed = urlparse(url)
         if parsed.scheme != 'https' or parsed.hostname not in ('drive.google.com', 'docs.google.com'): fail('请使用 Google Drive 或 Google Docs 的 HTTPS 链接')
         out = {'title': text_field(data, 'title', 200, True), 'url': url, 'project_id': text_field(data, 'project_id', 80, True)}
     else: fail('记录类型无效', 404)
-    if out.get('project_id') and not c.records('id=? AND kind=?', (out['project_id'], 'projects'), columns='id').fetchone(): fail('关联项目不存在')
+    if out.get('project_id') and not reference_record(c, 'project_id', out['project_id'], 'projects'): fail('关联项目不存在')
     if kind in ('notes', 'tasks', 'files', 'transactions', 'stock_movements'):
         out['subsection_id'] = text_field(data, 'subsection_id', 80)
         if out['subsection_id']:
-            section = c.records("id=? AND kind='subsections'", (out['subsection_id'],), columns='data').fetchone()
+            section = reference_record(c, 'subsection_id', out['subsection_id'], 'subsections')
             if not section or json.loads(section['data'])['project_id'] != out.get('project_id'):
                 fail('分区不存在或不属于所选项目')
     if kind == 'notes':
@@ -677,6 +811,12 @@ def validate(kind, data, c):
             task = c.records("id=? AND kind='tasks'", (out['linked_task_id'],), columns='data').fetchone()
             if not task or json.loads(task['data']).get('project_id') != out['project_id']:
                 fail('请选择同一项目中的待办')
+    if kind == 'tasks' and out.get('assignee_id') and c.access is not None and not c.workspace_id.startswith('personal:'):
+        resource, resource_id = record_resource(kind, out)
+        if resource:
+            assigned = c.execute("SELECT role FROM memberships WHERE workspace_id=? AND user_id=?", (c.workspace_id, out['assignee_id'])).fetchone()
+            grant = c.execute("SELECT role FROM resource_access WHERE workspace_id=? AND resource_kind=? AND resource_id=? AND user_id=? AND role IN ('viewer','editor')", (c.workspace_id, resource, resource_id, out['assignee_id'])).fetchone()
+            if not assigned or (assigned['role'] not in ('owner','admin') and not grant): fail('待办负责人没有对应项目或账本权限，请先分配访问权限')
     for key in ('owner_id', 'assignee_id'):
         if out.get(key) and out[key] not in {u['id'] for u in scope_roster(c) if u['active']}: fail('成员不属于当前空间或已停用')
     return out
@@ -696,6 +836,7 @@ def lock_records(c):
 
 
 def insert_record(c, kind, data, actor, action='新增'):
+    authorize_record(c, kind, data, write=True, creating=True)
     item_id, at = uid(), now()
     c.execute('INSERT INTO entities (id,kind,data,version,created_at,updated_at,created_by,updated_by,workspace_id) VALUES (?,?,?,?,?,?,?,?,?)', (item_id, kind, json.dumps(data, ensure_ascii=False), 1, at, at, actor, actor, c.workspace_id))
     audit(c, actor, action, kind, item_id, after=data)
@@ -741,33 +882,86 @@ def prepare_record(c, kind, body, user):
     return data
 
 
+@app.get('/api/resource-access/{kind}/{resource_id}')
+def resource_members(kind: str, resource_id: str, request: Request):
+    user = current_user(request)
+    with db() as c:
+        workspace = scope_request(c, request, user)
+        require_team_owner(c, workspace['id'], user)
+        resource_id = resource_target(c, kind, resource_id)
+        rows = c.execute('''SELECT u.id,u.name,u.username,u.active,m.role AS company_role,
+            COALESCE(r.role,'removed') AS access,COALESCE(r.version,0) AS version
+            FROM memberships m JOIN users u ON u.id=m.user_id
+            LEFT JOIN resource_access r ON r.workspace_id=m.workspace_id AND r.user_id=m.user_id AND r.resource_kind=? AND r.resource_id=?
+            WHERE m.workspace_id=? AND m.role IN ('owner','admin','member') ORDER BY u.name''', (kind, resource_id, workspace['id'])).fetchall()
+        return {'members': [dict(r) for r in rows]}
+
+
+@app.patch('/api/resource-access/{kind}/{resource_id}')
+def update_resource_members(kind: str, resource_id: str, body: dict, request: Request):
+    user = current_user(request)
+    with db() as c:
+        lock_records(c)
+        workspace = scope_request(c, request, user)
+        require_team_owner(c, workspace['id'], user)
+        resource_id = resource_target(c, kind, resource_id)
+        if not isinstance(body.get('members'), list) or any(not isinstance(m, dict) or 'version' not in m for m in body['members']): fail('请提供当前权限版本')
+        apply_resource_members(c, user, kind, resource_id, body['members'])
+    return {'ok': True}
+
+
 @app.get('/api/state')
 def state(request: Request):
     user = current_user(request)
     with db() as c:
         workspace = scope_request(c, request, user)
-        records = [entity(r) for r in c.records(order='updated_at DESC').fetchall() if r['kind'] not in ('transactions', 'finance_profiles') or can_finance(user)]
+        records = [present_record(c, r) for r in c.records(order='updated_at DESC').fetchall() if r['kind'] not in ('transactions', 'finance_profiles') or can_finance(user)]
         spaces = accessible_spaces(c, user)
+        access = c.access
     team = workspace['kind'] == 'team'
+    admin = team and workspace['access'] in ('owner', 'admin')
+    full_edit = access['full'] and not access['readonly']
+    has_edit = full_edit or any(role == 'editor' for kind in ('projects', 'finance_profiles') for role in access[kind].values())
+    finance = can_finance(user) and (access['full'] or bool(access['finance_profiles']))
     return {'records': records, 'workspace': workspace, 'workspaces': spaces,
-        'config': {'finance_access': can_finance(user), 'can_edit': workspace['access'] != 'viewer',
-        'can_manage_team': team and workspace['access'] == 'owner',
-        'drive_upload_ready': team and workspace['id'] == COMPANY_SPACE and workspace['access'] != 'viewer' and all(os.getenv(k) for k in ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN']),
-        'drive_folder_url': 'https://drive.google.com/drive/folders/' + DRIVE_FOLDER if team and workspace['id'] == COMPANY_SPACE else None,
-        'sheet_url': SHEET_URL if team and workspace['id'] == COMPANY_SPACE and can_finance(user) else None}}
+        'config': {'finance_access': finance, 'can_edit': has_edit,
+        'full_access': access['full'], 'full_edit': full_edit,
+        'project_access': access['projects'], 'ledger_access': access['finance_profiles'],
+        'can_manage_team': admin, 'can_manage_resources': admin,
+        'drive_upload_ready': team and workspace['id'] == COMPANY_SPACE and (full_edit or 'editor' in access['projects'].values()) and all(os.getenv(k) for k in ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN']),
+        'drive_folder_url': 'https://drive.google.com/drive/folders/' + DRIVE_FOLDER if admin and workspace['id'] == COMPANY_SPACE else None,
+        'sheet_url': SHEET_URL if admin and workspace['id'] == COMPANY_SPACE and finance else None}}
+
+
+def visible_audit(c, row, visible):
+    if c.access['full']: return True
+    if row['kind'] == 'resource_access':
+        data = json.loads(row['after_data']) or json.loads(row['before_data']) or {}
+        return bool(c.access.get(data.get('resource_kind'), {}).get(data.get('resource_id')))
+    if row['kind'] not in ('projects','finance_profiles','transactions','subsections','tasks','notes','files','stock_movements'):
+        return False
+    if row['entity_id'] not in visible: return False
+    # Historical moves can contain content from two permission boundaries.
+    # Both snapshots and the current record must be authorized.
+    for snapshot in ('before_data', 'after_data'):
+        data = json.loads(row[snapshot])
+        if data and not record_role(c, row['kind'], data, row['entity_id']): return False
+    return True
 
 
 @app.get('/api/activity')
 def activity(request: Request, entity_id: str = '', limit: int = 100):
     user = current_user(request)
-    sql = 'SELECT a.*, u.name AS actor_name FROM audit a LEFT JOIN users u ON a.actor=u.id WHERE a.workspace_id=?'
-    params = []
-    if entity_id: sql += ' AND a.entity_id=?'; params.append(entity_id)
-    if not can_finance(user): sql += " AND a.kind NOT IN ('transactions', 'finance_profiles')"
-    sql += ' ORDER BY a.at DESC LIMIT ?'; params.append(max(1, min(limit, 500)))
     with db() as c:
         scope_request(c, request, user)
-        return [{**dict(r), 'before': json.loads(r['before_data']), 'after': json.loads(r['after_data'])} for r in c.execute(sql, (c.workspace_id, *params)).fetchall()]
+        sql = 'SELECT a.*, u.name AS actor_name FROM audit a LEFT JOIN users u ON a.actor=u.id WHERE a.workspace_id=?'
+        params = [c.workspace_id]
+        if entity_id: sql += ' AND a.entity_id=?';params.append(entity_id)
+        if not can_finance(user): sql += " AND a.kind NOT IN ('transactions', 'finance_profiles')"
+        visible = {r['id'] for r in c.records(columns='id').fetchall()}
+        rows = c.execute(sql + ' ORDER BY a.at DESC', tuple(params)).fetchall()
+        allowed = [r for r in rows if visible_audit(c, r, visible)][:max(1, min(limit, 500))]
+        return [{**dict(r), 'before': json.loads(r['before_data']), 'after': json.loads(r['after_data'])} for r in allowed]
 
 
 @app.post('/api/records/{kind}')
@@ -777,11 +971,14 @@ def create_record(kind: str, body: dict, request: Request):
     with db() as c:
         lock_records(c)
         scope_request(c, request, user, write=True)
+        authorize_record(c, kind, body, write=True, creating=True)
         data = prepare_record(c, kind, body, user)
         if kind == 'products': check_product(c, data)
         if kind == 'stock_movements': check_stock_balance(c, data)
         item_id = insert_record(c, kind, data, user['id'])
-        return entity(c.records('id=?', (item_id,)).fetchone())
+        if kind in ('projects', 'finance_profiles') and 'member_access' in body:
+            apply_resource_members(c, user, kind, item_id, body['member_access'])
+        return present_record(c, c.records('id=?', (item_id,)).fetchone())
 
 
 @app.patch('/api/records/{kind}/{item_id}')
@@ -795,26 +992,29 @@ def update_record(kind: str, item_id: str, body: dict, request: Request):
         if not row: fail('记录不存在', 404)
         if body.get('version') != row['version']: fail('其他成员已更新此记录，请刷新后再编辑', 409)
         before = json.loads(row['data'])
+        authorize_record(c, kind, before, item_id, write=True)
+        c.existing = (kind, before)
         data = prepare_record(c, kind, {**before, **body}, user)
+        authorize_record(c, kind, data, item_id, write=True)
         if kind == 'products': check_product(c, data, item_id, before)
         if kind == 'stock_movements': check_stock_balance(c, data, item_id)
         if kind == 'transactions':
             # Import provenance is set only by the administrative importer. A
             # member can edit the ledger fields, but cannot rewrite the source.
             if 'source_import' in before: data['source_import'] = before['source_import']
-            for movement in c.records("kind='stock_movements'", columns='data').fetchall():
+            for movement in c.records("kind='stock_movements'", columns='data', internal=True).fetchall():
                 movement = json.loads(movement['data'])
                 if movement.get('linked_transaction_id') == item_id: validate_stock_link(c, movement, data)
         if kind == 'subsections' and data['project_id'] != before['project_id']:
             fail('分区不能移动到其他项目，请在目标项目新建分区')
         if kind == 'tasks' and data.get('project_id') != before.get('project_id'):
-            for note in c.records("kind='notes'", columns='data').fetchall():
+            for note in c.records("kind='notes'", columns='data', internal=True).fetchall():
                 if json.loads(note['data']).get('linked_task_id') == item_id:
                     fail('此待办已关联笔记，请先解除关联再更换项目')
         result = c.execute('UPDATE entities SET data=?, version=version+1, updated_at=?, updated_by=? WHERE id=? AND version=? AND workspace_id=?', (json.dumps(data, ensure_ascii=False), now(), user['id'], item_id, row['version'], c.workspace_id))
         if result.rowcount != 1: fail('记录已被更新，请刷新', 409)
         audit(c, user['id'], '修改', kind, item_id, before, data)
-        return entity(c.records('id=?', (item_id,)).fetchone())
+        return present_record(c, c.records('id=?', (item_id,)).fetchone())
 
 
 @app.post('/api/upload')
@@ -823,6 +1023,7 @@ def upload(request: Request, project_id: str = Form(...), file: UploadFile = Fil
     with db() as c:
         workspace = scope_request(c, request, user, write=True)
         if workspace['kind'] != 'team' or workspace['id'] != COMPANY_SPACE: fail('此空间未配置专属 Drive 上传，请添加自己有权限的文件链接', 403)
+        authorize_record(c, 'files', {'project_id': project_id}, write=True, creating=True)
         validate('files', {'title': '附件', 'url': 'https://drive.google.com/', 'project_id': project_id, 'subsection_id': subsection_id}, c)
     creds = [os.getenv(k) for k in ('GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN')]
     if not all(creds): fail('管理员尚未连接 Google Drive。可先添加已有文件链接。', 503)

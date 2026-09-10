@@ -55,6 +55,7 @@ def test_six_users_and_member_finance(client):
         r=client.post('/api/users',json={'name':f'Member {n}','username':f'user{n}','password':'member-password-123!'})
         assert r.status_code==200;ids.append(r.json()['id'])
     assert client.post('/api/users',json={'name':'seventh','username':'user6','password':'member-password-123!'}).status_code==400
+    assert client.patch('/api/resource-access/finance_profiles/default',json={'members':[{'user_id':ids[0],'role':'editor','version':0}]}).status_code==200
     assert login(client,'user0','member-password-123!').status_code==200
     assert client.post('/api/password',json={'current_password':'member-password-123!','password':'changed-member-123!'}).status_code==200
     login(client,'user0','changed-member-123!')

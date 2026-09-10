@@ -107,7 +107,7 @@ def test_unique_sku_unit_protection_and_finance_permissions(client,monkeypatch):
     assert client.post('/api/records/products',json={'title':'duplicate','sku':'test-sku','unit':'件'}).status_code==400
     movement(client,item['id'])
     assert client.patch('/api/records/products/'+item['id'],json={'version':1,'unit':'件'}).status_code==400
-    client.post('/api/users',json={'name':'M','username':'member','password':'member-password-123!'})
+    client.post('/api/users',json={'name':'M','username':'member','password':'member-password-123!','team_role':'admin'})
     login(client,'member','member-password-123!')
     client.post('/api/password',json={'current_password':'member-password-123!','password':'changed-member-123!'})
     login(client,'member','changed-member-123!')

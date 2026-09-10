@@ -8,3 +8,9 @@
 .account-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
 [hidden]{display:none!important}
 @media(max-width:700px){.workspace-controls .field{max-width:none;flex-basis:100%}.workspace-actions{gap:10px}.privacy-note{margin-bottom:20px}.account-actions{width:100%;justify-content:flex-start}.user-row:has(.account-actions){flex-wrap:wrap}.maintenance-banner button{display:block;margin:8px 0 0}}
+.resource-members{border:1px solid var(--line);border-radius:12px;padding:16px;margin:12px 0}
+.resource-members legend{font-weight:600;padding:0 6px}
+.member-check{display:flex;align-items:center;gap:10px;padding:10px 0}
+.member-check input{width:18px;height:18px;margin:0}
+
+.resource-permission-list .field{width:100%;margin-bottom:16px}

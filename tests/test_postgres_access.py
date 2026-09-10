@@ -45,15 +45,15 @@ def test_postgres_migration_force_rls_and_maintenance(monkeypatch):
             assert 'id' in private
             with psycopg.connect(**args) as c:
                 # A legacy connection without scope must not see any personal data.
-                assert c.execute('SELECT id FROM entities').fetchall() == [('legacy',)]
+                assert c.execute('SELECT id FROM entities').fetchall() == []
                 assert c.execute('SELECT id FROM audit').fetchall() == []
                 assert c.execute('SELECT relrowsecurity,relforcerowsecurity FROM pg_class WHERE oid=%s::regclass', ('entities',)).fetchone() == (True, True)
-                c.execute("SELECT set_config('cmp.workspace_id',%s,true)", (private['workspace_id'],))
+                c.execute("SELECT set_config('cmp.workspace_id',%s,true),set_config('cmp.access_version','2',true)", (private['workspace_id'],))
                 assert c.execute('SELECT id FROM entities').fetchall() == [(private['id'],)]
                 assert len(c.execute('SELECT id FROM audit').fetchall()) == 1
             app.initialize()  # Restart with FORCE RLS already enabled.
             assert client.get('/api/state').json()['records'][0]['id'] == private['id']
-            member = client.post('/api/users', json={'name':'Chloe','username':'chloe','password':'synthetic-member-pass!','team_role':'viewer'}).json()
+            member = client.post('/api/users', json={'name':'Chloe','username':'chloe','password':'synthetic-member-pass!','team_role':'member'}).json()
             with app.db() as c:
                 c.scope(app.personal_space(member['id']))
                 member_record = app.insert_record(c, 'projects', app.validate('projects', {'title':'Member secret'}, c), member['id'])
@@ -66,6 +66,19 @@ def test_postgres_migration_force_rls_and_maintenance(monkeypatch):
             assert client.post('/api/records/tasks', json={'title':'forbidden'}).status_code == 403
             assert client.post('/api/maintenance/' + grant['id'] + '/revoke').status_code == 200
             assert client.get('/api/state').status_code == 403
+            client.headers['X-Cmp-Workspace']='company';client.headers.pop('X-Cmp-Maintenance')
+            assert client.patch('/api/resource-access/projects/legacy',json={'members':[{'user_id':member['id'],'role':'viewer','version':0}]}).status_code==200
+            ledger=client.post('/api/records/finance_profiles',json={'title':'PG ledger','member_access':[{'user_id':member['id'],'role':'editor'}]}).json()
+            money=client.post('/api/records/transactions',json={'title':'PG money','amount':'12','profile_id':ledger['id']}).json()
+            task=client.post('/api/records/tasks',json={'title':'PG ledger task','ledger_task':True,'profile_id':ledger['id']}).json()
+            assert client.post('/api/login',json={'username':'chloe','password':'synthetic-member-pass!'}).status_code==200
+            assert client.post('/api/password',json={'current_password':'synthetic-member-pass!','password':'synthetic-changed-pass!'}).status_code==200
+            assert client.post('/api/login',json={'username':'chloe','password':'synthetic-changed-pass!'}).status_code==200
+            scoped=client.get('/api/state');assert scoped.status_code==200,scoped.text
+            assert {r['id'] for r in scoped.json()['records']}=={'legacy',ledger['id'],money['id'],task['id']}
+            assert client.patch('/api/records/projects/legacy',json={'version':3,'title':'forged'}).status_code==403
+            assert client.patch('/api/records/transactions/'+money['id'],json={'version':1,'amount':'15'}).status_code==200
+            assert len(client.get('/api/activity?entity_id='+money['id']).json())==2
     finally:
         args.pop('options')
         with psycopg.connect(**args, autocommit=True) as c:
