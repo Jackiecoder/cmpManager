@@ -76,9 +76,10 @@ function draw() {
 function renderPage() {return ({home:homePage,projects:projectsPage,inventory:inventoryPage,finance:financePage,tasks:tasksPage,activity:activityPage,users:usersPage,team:teamPage,security:securityPage}[view]||homePage)();}
 function projectCard(p) {
  const latest = CmpTimeline.notesForProject(records, p.id)[0];
+ const attachmentCount = byKind('files').filter(f=>f.project_id===p.id).length;
  return `<button class="project-card" data-project="${p.id}"><div class="spread"><h3>${esc(p.title)}</h3>${badge(p.status)}</div><p>${esc(p.description || '还没有项目说明')}</p>
  <div class="card-timeline"><span class="meta">最近时间线</span>${latest ? `<div class="card-timeline-entry" data-timeline-project="${p.id}" data-timeline-section="${esc(latest.subsection_id||'')}"><span class="timeline-section">${esc(sectionName(latest.subsection_id))} · <time datetime="${esc(latest.date)}">${esc(latest.date)}</time></span><strong>${esc(latest.title)}</strong></div>` : '<span class="meta">暂无时间线记录</span>'}</div>
- <div class="spread meta"><span>${p.due_date?esc(p.due_date)+' 截止':'未设截止日'}</span><span>${byKind('tasks').filter(t=>t.project_id===p.id&&t.status!=='已完成').length} 项待办</span></div></button>`;
+ <div class="spread meta"><span>${p.due_date?esc(p.due_date)+' 截止':'未设截止日'}</span><span class="card-resource-counts">${attachmentCount?`<span class="card-attachment-count">${icon('file')} ${attachmentCount} 个附件</span>`:''}<span>${byKind('tasks').filter(t=>t.project_id===p.id&&t.status!=='已完成').length} 项待办</span></span></div></button>`;
 }
 function homePage() {
  const active=byKind('projects').filter(p=>p.status==='进行中'), pending=byKind('tasks').filter(t=>t.status!=='已完成');
