@@ -48,8 +48,10 @@ class DB:
         if DATABASE_URL:
             self.execute("SELECT set_config('cmp.workspace_id', ?, true), set_config('cmp.access_version','2',true)", (workspace_id,))
 
-    def records(self, where='1=1', params=(), columns='*', order='', internal=False):
+    def records(self, where='1=1', params=(), columns='*', order='', internal=False, include_deleted=False):
         clause, access_params = resource_filter(self) if not internal else ('1=1', ())
+        if not internal and not include_deleted:
+            where = f'({where}) AND ({active_record_filter()})'
         return self.execute(f'SELECT {columns} FROM entities WHERE workspace_id=? AND ({where}) AND ({clause})' + (f' ORDER BY {order}' if order else ''), (self.workspace_id, *params, *access_params))
 
 
@@ -206,6 +208,25 @@ def resource_filter(c):
     return ' OR '.join(clauses), tuple(params)
 
 
+def active_record_filter():
+    def value(alias, key):
+        return f"COALESCE({alias}.data::jsonb->>'{key}','')" if DATABASE_URL else f"COALESCE(json_extract({alias}.data,'$.{key}'),'')"
+    # Keep ledger and inventory facts visible and counted. Project content is
+    # retained for audit, but no longer appears in active lists or file reads.
+    return (f"{value('entities', 'deleted_at')}='' AND NOT ("
+            "entities.kind IN ('notes','tasks','files','subsections') AND EXISTS ("
+            "SELECT 1 FROM entities p WHERE p.workspace_id=entities.workspace_id AND p.kind='projects' "
+            f"AND p.id={value('entities', 'project_id')} AND {value('p', 'deleted_at')}!=''))")
+
+
+def deleted_project(c, project_id):
+    if not project_id: return None
+    if hasattr(c, 'deleted_projects'): return c.deleted_projects.get(project_id)
+    row = c.records("id=? AND kind='projects'", (project_id,), internal=True).fetchone()
+    data = json.loads(row['data']) if row else {}
+    return data if data.get('deleted_at') else None
+
+
 def record_resource(kind, data, item_id=''):
     if kind in ('projects', 'finance_profiles'): return kind, item_id
     if kind == 'transactions' or (kind == 'tasks' and (data.get('ledger_task') or data.get('profile_id'))):
@@ -230,6 +251,9 @@ def authorize_record(c, kind, data, item_id='', write=False, creating=False):
         fail('只有公司 Admin 可以创建项目、账本和库存档案', 403)
     role = record_role(c, kind, data, item_id)
     if not role or (write and role != 'editor'): fail('没有此项目或账本的操作权限', 403)
+    resource, resource_id = record_resource(kind, data, item_id)
+    if write and resource == 'projects' and deleted_project(c, resource_id):
+        fail('项目已删除，不能再添加或修改项目记录', 409)
 
 
 def reference_record(c, key, item_id, kind):
@@ -243,6 +267,14 @@ def reference_record(c, key, item_id, kind):
 def present_record(c, row):
     record = entity(row)
     record['_access'] = record_role(c, row['kind'], record, row['id'])
+    if row['kind'] in ('transactions', 'stock_movements'):
+        project_id = record.get('project_id', '')
+        if project_id and record_role(c, 'projects', {}, project_id):
+            deleted = deleted_project(c, project_id)
+            if deleted:
+                record['_project_deleted'] = True
+                record['_project_title'] = deleted['title']
+                if row['kind'] == 'stock_movements': record['_access'] = 'viewer'
     return record
 
 
@@ -929,6 +961,10 @@ def state(request: Request):
     user = current_user(request)
     with db() as c:
         workspace = scope_request(c, request, user)
+        # Resolve deleted project labels once per state read, not once per
+        # ledger row. Only authorized project names enter the response cache.
+        c.deleted_projects = {r['id']: data for r in c.records("kind='projects'", include_deleted=True).fetchall()
+                              if (data := json.loads(r['data'])).get('deleted_at')}
         records = [present_record(c, r) for r in c.records(order='updated_at DESC').fetchall() if r['kind'] not in ('transactions', 'finance_profiles') or can_finance(user)]
         spaces = accessible_spaces(c, user)
         access = c.access
@@ -973,7 +1009,7 @@ def activity(request: Request, entity_id: str = '', limit: int = 100):
         params = [c.workspace_id]
         if entity_id: sql += ' AND a.entity_id=?';params.append(entity_id)
         if not can_finance(user): sql += " AND a.kind NOT IN ('transactions', 'finance_profiles')"
-        visible = {r['id'] for r in c.records(columns='id').fetchall()}
+        visible = {r['id'] for r in c.records(columns='id', include_deleted=True).fetchall()}
         rows = c.execute(sql + ' ORDER BY a.at DESC', tuple(params)).fetchall()
         allowed = [r for r in rows if visible_audit(c, r, visible)][:max(1, min(limit, 500))]
         return [{**dict(r), 'before': json.loads(r['before_data']), 'after': json.loads(r['after_data'])} for r in allowed]
@@ -990,8 +1026,10 @@ def create_record(kind: str, body: dict, request: Request):
         item_id = None
         if kind == 'projects' and body.get('creation_key'):
             item_id = request_record_id(c.workspace_id, user['id'], 'projects', body['creation_key'])
-            existing = c.records('id=? AND kind=?', (item_id, kind)).fetchone()
-            if existing: return present_record(c, existing)
+            existing = c.records('id=? AND kind=?', (item_id, kind), include_deleted=True).fetchone()
+            if existing:
+                if json.loads(existing['data']).get('deleted_at'): fail('该项目已删除，请重新打开新建项目表单', 409)
+                return present_record(c, existing)
         if kind == 'projects' and body.get('with_attachments'):
             require_storage()
         data = prepare_record(c, kind, body, user)
@@ -1040,6 +1078,28 @@ def update_record(kind: str, item_id: str, body: dict, request: Request):
         if result.rowcount != 1: fail('记录已被更新，请刷新', 409)
         audit(c, user['id'], '修改', kind, item_id, before, data)
         return present_record(c, c.records('id=?', (item_id,)).fetchone())
+
+
+@app.delete('/api/records/projects/{item_id}')
+def delete_project(item_id: str, body: dict, request: Request):
+    user = current_user(request)
+    with db() as c:
+        lock_records(c)
+        scope_request(c, request, user, write=True)
+        if not c.access['full']: fail('只有公司 Admin 或个人空间主人可以删除项目', 403)
+        row = c.records("id=? AND kind='projects'", (item_id,), include_deleted=True).fetchone()
+        if not row: fail('项目不存在', 404)
+        before = json.loads(row['data'])
+        if before.get('deleted_at'): fail('项目已删除，请刷新列表', 409)
+        if body.get('version') != row['version']: fail('项目已被更新，请刷新后重新确认删除', 409)
+        if body.get('confirm_title') != before['title']: fail('请输入完整项目名称确认删除')
+        at = now()
+        after = {**before, 'deleted_at': at, 'deleted_by': user['id']}
+        result = c.execute('UPDATE entities SET data=?,version=version+1,updated_at=?,updated_by=? WHERE id=? AND version=? AND workspace_id=?',
+                           (json.dumps(after, ensure_ascii=False), at, user['id'], item_id, row['version'], c.workspace_id))
+        if result.rowcount != 1: fail('项目已被更新，请刷新后重新确认删除', 409)
+        audit(c, user['id'], '删除', 'projects', item_id, before, after)
+    return {'ok': True}
 
 
 def request_record_id(workspace, actor, resource, key):

@@ -45,7 +45,7 @@ def test_audit_immutable_and_concurrent_update(client):
     assert client.patch('/api/records/projects/'+p['id'],json={**p,'progress':80}).status_code==409
     log=client.get('/api/activity?entity_id='+p['id']).json()
     assert len(log)==2 and log[0]['before']['progress']==20 and log[0]['after']['progress']==50
-    assert client.delete('/api/records/projects/'+p['id']).status_code==405
+    assert client.delete('/api/records/projects/'+p['id']).status_code==422
     assert client.get('/api/state').json()['records'][0]['progress']==50
 
 def test_six_users_and_member_finance(client):
