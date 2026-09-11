@@ -353,10 +353,11 @@ async def security(request, call_next):
     return response
 
 
-def current_user(request, allow_change=False):
+def current_user(request, allow_change=False, connection=None):
+    if connection is None:
+        with db() as c: return current_user(request, allow_change, c)
     token = hashlib.sha256(request.cookies.get('cmp_session', '').encode()).hexdigest()
-    with db() as c:
-        row = c.execute('SELECT u.* FROM users u JOIN sessions s ON s.user_id=u.id WHERE s.token=? AND s.expires>? AND u.active=1', (token, time.time())).fetchone()
+    row = connection.execute('SELECT u.* FROM users u JOIN sessions s ON s.user_id=u.id WHERE s.token=? AND s.expires>? AND u.active=1', (token, time.time())).fetchone()
     if not row: fail('请先登录', 401)
     if row['must_change'] and not allow_change: fail('请先修改初始密码', 403)
     return clean_user(row)
@@ -835,9 +836,9 @@ def lock_records(c):
     if DATABASE_URL: c.execute('SELECT pg_advisory_xact_lock(74391003)')
 
 
-def insert_record(c, kind, data, actor, action='新增'):
+def insert_record(c, kind, data, actor, action='新增', item_id=None):
     authorize_record(c, kind, data, write=True, creating=True)
-    item_id, at = uid(), now()
+    item_id, at = item_id or uid(), now()
     c.execute('INSERT INTO entities (id,kind,data,version,created_at,updated_at,created_by,updated_by,workspace_id) VALUES (?,?,?,?,?,?,?,?,?)', (item_id, kind, json.dumps(data, ensure_ascii=False), 1, at, at, actor, actor, c.workspace_id))
     audit(c, actor, action, kind, item_id, after=data)
     return item_id
@@ -972,10 +973,18 @@ def create_record(kind: str, body: dict, request: Request):
         lock_records(c)
         scope_request(c, request, user, write=True)
         authorize_record(c, kind, body, write=True, creating=True)
+        item_id = None
+        if kind == 'projects' and body.get('creation_key'):
+            item_id = request_record_id(c.workspace_id, user['id'], 'projects', body['creation_key'])
+            existing = c.records('id=? AND kind=?', (item_id, kind)).fetchone()
+            if existing: return present_record(c, existing)
+        if kind == 'projects' and body.get('with_attachments'):
+            require_drive_workspace(c.workspace_id)
+            drive_credentials()
         data = prepare_record(c, kind, body, user)
         if kind == 'products': check_product(c, data)
         if kind == 'stock_movements': check_stock_balance(c, data)
-        item_id = insert_record(c, kind, data, user['id'])
+        item_id = insert_record(c, kind, data, user['id'], item_id=item_id)
         if kind in ('projects', 'finance_profiles') and 'member_access' in body:
             apply_resource_members(c, user, kind, item_id, body['member_access'])
         return present_record(c, c.records('id=?', (item_id,)).fetchone())
@@ -995,6 +1004,9 @@ def update_record(kind: str, item_id: str, body: dict, request: Request):
         authorize_record(c, kind, before, item_id, write=True)
         c.existing = (kind, before)
         data = prepare_record(c, kind, {**before, **body}, user)
+        if kind == 'files':
+            for key in ('drive_file_id', 'upload_sha256'):
+                if key in before: data[key] = before[key]
         authorize_record(c, kind, data, item_id, write=True)
         if kind == 'products': check_product(c, data, item_id, before)
         if kind == 'stock_movements': check_stock_balance(c, data, item_id)
@@ -1017,34 +1029,90 @@ def update_record(kind: str, item_id: str, body: dict, request: Request):
         return present_record(c, c.records('id=?', (item_id,)).fetchone())
 
 
+def request_record_id(workspace, actor, resource, key):
+    try: key = str(uuid.UUID(str(key)))
+    except (ValueError, TypeError, AttributeError): fail('提交标识无效，请重新打开表单')
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f'cmpmanager:{workspace}:{actor}:{resource}:{key}'))
+
+
+def require_drive_workspace(workspace_id):
+    if workspace_id != COMPANY_SPACE:
+        fail('此空间未配置专属 Drive 上传，请添加自己有权限的文件链接', 403)
+
+
+def drive_credentials():
+    creds = [os.getenv(k) for k in ('GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN')]
+    if not all(creds): fail('管理员尚未连接 Google Drive。可先添加已有文件链接。', 503)
+    return creds
+
+
 @app.post('/api/upload')
-def upload(request: Request, project_id: str = Form(...), file: UploadFile = File(...), subsection_id: str = Form('')):
+def upload(request: Request, project_id: str = Form(...), file: UploadFile = File(...), subsection_id: str = Form(''), upload_key: str = Form('')):
     user = current_user(request)
     with db() as c:
         workspace = scope_request(c, request, user, write=True)
-        if workspace['kind'] != 'team' or workspace['id'] != COMPANY_SPACE: fail('此空间未配置专属 Drive 上传，请添加自己有权限的文件链接', 403)
+        require_drive_workspace(workspace['id'])
         authorize_record(c, 'files', {'project_id': project_id}, write=True, creating=True)
         validate('files', {'title': '附件', 'url': 'https://drive.google.com/', 'project_id': project_id, 'subsection_id': subsection_id}, c)
-    creds = [os.getenv(k) for k in ('GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN')]
-    if not all(creds): fail('管理员尚未连接 Google Drive。可先添加已有文件链接。', 503)
+    creds = drive_credentials()
     content = file.file.read(20 * 1024 * 1024 + 1)
     if len(content) > 20 * 1024 * 1024: fail('文件不能超过 20 MB', 413)
-    title = Path(file.filename or '附件').name[:200]
-    try:
-        token = requests.post('https://oauth2.googleapis.com/token', data={'client_id': creds[0], 'client_secret': creds[1], 'refresh_token': creds[2], 'grant_type': 'refresh_token'}, timeout=30)
-        token.raise_for_status()
-        boundary = 'cmp_' + secrets.token_hex(24)
-        metadata = json.dumps({'name': title, 'parents': [DRIVE_FOLDER], 'appProperties': {'cmpProjectId': project_id, 'cmpUserId': user['id']}}).encode()
-        mime = file.content_type or 'application/octet-stream'
-        if not re.fullmatch(r'[a-zA-Z0-9.+-]+/[a-zA-Z0-9.+-]+', mime): mime = 'application/octet-stream'
-        payload = (f'--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n'.encode() + metadata
-                   + f'\r\n--{boundary}\r\nContent-Type: {mime}\r\n\r\n'.encode() + content
-                   + f'\r\n--{boundary}--\r\n'.encode())
-        result = requests.post('https://www.googleapis.com/upload/drive/v3/files', params={'uploadType': 'multipart', 'fields': 'id,webViewLink'}, headers={'Authorization': 'Bearer ' + token.json()['access_token'], 'Content-Type': 'multipart/related; boundary=' + boundary}, data=payload, timeout=120)
-        result.raise_for_status()
-    except requests.RequestException: fail('Google Drive 上传失败，请检查授权后重试', 502)
-    remote = result.json()
-    return create_record('files', {'title': title, 'url': remote.get('webViewLink') or 'https://drive.google.com/file/d/' + remote['id'] + '/view', 'project_id': project_id, 'subsection_id': subsection_id}, request)
+    title = Path((file.filename or '附件').replace('\\', '/')).name[:200] or '附件'
+    digest = hashlib.sha256(content).hexdigest()
+    with db() as c:
+        scope_request(c, request, user, write=True)
+        item_id = request_record_id(c.workspace_id, user['id'], 'files:' + project_id, upload_key) if upload_key else uid()
+        # Serialize retries of this attachment without blocking all company edits
+        # while Google receives the file. The final record and audit commit together.
+        if DATABASE_URL:
+            c.execute('SELECT pg_advisory_xact_lock(?)', (int.from_bytes(hashlib.sha256(item_id.encode()).digest()[:8], 'big', signed=True),))
+        user = current_user(request, connection=c)
+        scope_request(c, request, user, write=True)
+        authorize_record(c, 'files', {'project_id': project_id}, write=True, creating=True)
+        existing = c.records("id=? AND kind='files'", (item_id,)).fetchone()
+        if existing:
+            previous = json.loads(existing['data'])
+            if previous.get('upload_sha256') != digest or previous.get('project_id') != project_id or previous.get('subsection_id', '') != subsection_id:
+                fail('此附件已保存或移动，请刷新项目后检查', 409)
+            return present_record(c, existing)
+        try:
+            token = requests.post('https://oauth2.googleapis.com/token', data={'client_id': creds[0], 'client_secret': creds[1], 'refresh_token': creds[2], 'grant_type': 'refresh_token'}, timeout=30)
+            token.raise_for_status()
+            headers = {'Authorization': 'Bearer ' + token.json()['access_token']}
+            remote = None
+            if upload_key:
+                # Reconcile a previous upload whose response or DB commit was lost.
+                found = requests.get('https://www.googleapis.com/drive/v3/files', params={'q': "trashed=false and appProperties has { key='cmpUploadId' and value='" + item_id + "' }", 'fields': 'files(id,webViewLink,appProperties,parents)', 'pageSize': 2}, headers=headers, timeout=30)
+                found.raise_for_status()
+                matches = found.json().get('files', [])
+                if matches:
+                    if len(matches) != 1 or matches[0].get('appProperties', {}).get('cmpSha256') != digest or DRIVE_FOLDER not in matches[0].get('parents', []):
+                        fail('Drive 中已有不同内容的附件，请刷新项目后检查', 409)
+                    remote = matches[0]
+            if remote is None:
+                boundary = 'cmp_' + secrets.token_hex(24)
+                metadata = json.dumps({'name': title, 'parents': [DRIVE_FOLDER], 'appProperties': {'cmpProjectId': project_id, 'cmpUserId': user['id'], 'cmpUploadId': item_id, 'cmpSha256': digest}}).encode()
+                mime = file.content_type or 'application/octet-stream'
+                if not re.fullmatch(r'[a-zA-Z0-9.+-]+/[a-zA-Z0-9.+-]+', mime): mime = 'application/octet-stream'
+                payload = (f'--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n'.encode() + metadata
+                           + f'\r\n--{boundary}\r\nContent-Type: {mime}\r\n\r\n'.encode() + content
+                           + f'\r\n--{boundary}--\r\n'.encode())
+                result = requests.post('https://www.googleapis.com/upload/drive/v3/files', params={'uploadType': 'multipart', 'fields': 'id,webViewLink'}, headers={**headers, 'Content-Type': 'multipart/related; boundary=' + boundary}, data=payload, timeout=120)
+                result.raise_for_status()
+                remote = result.json()
+            remote_id = remote['id']
+            if not re.fullmatch(r'[a-zA-Z0-9_-]+', remote_id): raise ValueError('Invalid Drive ID')
+        except (requests.RequestException, ValueError, KeyError, TypeError):
+            fail('Google Drive 上传未完成，请重试；已保存的附件会自动核对。', 502)
+        # Recheck the session, project membership and subsection after network I/O.
+        lock_records(c)
+        user = current_user(request, connection=c)
+        scope_request(c, request, user, write=True)
+        authorize_record(c, 'files', {'project_id': project_id}, write=True, creating=True)
+        data = validate('files', {'title': title, 'url': 'https://drive.google.com/file/d/' + remote_id + '/view', 'project_id': project_id, 'subsection_id': subsection_id}, c)
+        data.update(drive_file_id=remote_id, upload_sha256=digest)
+        insert_record(c, 'files', data, user['id'], item_id=item_id)
+        return present_record(c, c.records('id=?', (item_id,)).fetchone())
 
 
 app.mount('/static', StaticFiles(directory=ROOT / 'static'), name='static')

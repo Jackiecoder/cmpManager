@@ -41,7 +41,8 @@ export ADMIN_INITIAL_PASSWORD='replace-with-a-long-random-password'
 .venv/bin/python -m pytest -q
 node --check static/app.js
 node --check static/workspaces.js
-node --test tests/test_timeline.js tests/test_finance.js tests/test_inventory.js
+node --check static/project-attachments.js
+node --test tests/test_*.js
 ```
 
 ## GCP 部署
@@ -74,7 +75,11 @@ export DRIVE_FOLDER_ID=your-google-drive-folder
 - `GOOGLE_CLIENT_SECRET`
 - `GOOGLE_REFRESH_TOKEN`（拥有目标文件夹上传权限的用户，授权包含 Drive scope）
 
-接口把最多 20 MB 文件上传到 `DRIVE_FOLDER_ID`，并记录项目 ID、上传人及 Drive 链接。没有授权时明确显示“尚未连接”，支持先记录现有 Drive 文件链接。上传不会更改文件或文件夹的共享权限，因此访问链接仍须相应的 Google Drive 权限。
+新建项目时可以选择最多 10 个附件，每个最大 20 MB。保存后先创建项目及成员权限，再逐个上传到 `DRIVE_FOLDER_ID`，记录项目 ID、上传人及 Drive 链接，最后打开项目附件列表。失败时保留项目、成功附件和仍在页面中的待上传文件，可单独重试。关闭或刷新页面后，需要重新选择尚未完成的文件。
+
+创建请求使用同一个 `creation_key` 重试时返回已创建的项目，不重复写入项目或成员授权。附件使用 `upload_key` 和内容摘要核对数据库及 Drive 中的已有文件；重复请求在 PostgreSQL 中按附件串行处理，业务记录与审计同事务提交。上传结束后重新核对登录和项目权限。
+
+没有授权时明确显示“尚未连接”，支持先记录现有 Drive 文件链接。上传不会更改文件或文件夹的共享权限，因此访问链接仍须相应的 Google Drive 权限。
 
 当前版本没有在线 OAuth 配置向导。管理员需要创建 Google OAuth 客户端并提供 refresh token，或者由运维人员帮助完成首次授权。聊天中的 Drive 连接不能直接作为部署应用的长期凭据。
 

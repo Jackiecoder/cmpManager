@@ -40,7 +40,7 @@ async function api(path, method='GET', data) {
  try {response = await fetch('/api'+path,opts);} catch {throw new Error('连接失败，请检查网络后重试。未保存的内容仍保留在表单中。');}
  const result = await response.json().catch(() => ({}));
  if (!response.ok) {
-  if(response.status===401 && path!=='/login') {me=null; closeModal(); loginPage();}
+  if(response.status===401 && path!=='/login') {me=null; closeModal(true); loginPage();}
   const error=new Error(typeof result.detail === 'string' ? result.detail : '请求未完成，请检查输入后重试');error.status=response.status;throw error;
  }
  return result;
@@ -207,7 +207,7 @@ function select(name,label,options,value='',required=false) {return `<label clas
 const projectSelect = (value,required=false) => select('project_id','关联项目',[...(value&&!find(value)?[[value,'未授权项目（保留已有关联）']]:[]),['',required?'请选择项目':'不关联项目'],...byKind('projects').map(p=>[p.id,p.title])],value,required);
 const peopleSelect = (name,label,value) => select(name,label,[['','未指定'],...people.filter(p=>p.active).map(p=>[p.id,p.name])],value);
 function openModal(title,body) {const modal=$('#modal');modal.innerHTML=`<div class="dialog-head"><h2>${esc(title)}</h2><button data-action="close-modal" aria-label="关闭">${icon('close')}</button></div>${body}`;if(!modal.open)modal.showModal();}
-function closeModal() {$('#modal').close();}
+function closeModal(force=false) {if(!force&&$('#modal').dataset.busy==='true')return;$('#modal').close();}
 function formWrap(content,button='保存记录') {return `<form id="editor"><div class="form-grid">${content}</div><p class="error" role="alert"></p><div class="dialog-footer"><button type="button" class="secondary" data-action="close-modal">取消</button><button class="primary" type="submit">${button}</button></div></form>`;}
 function bindSubmit(handler) {$('#editor').addEventListener('submit', async e=>{e.preventDefault();const form=e.currentTarget,button=$('button[type=submit]',form);button.disabled=true;$('.error',form).textContent='';try{await handler(new FormData(form));}catch(error){$('.error',form).textContent=error.message;}finally{button.disabled=false;}});}
 
@@ -234,6 +234,46 @@ function refreshProjectFields() {
  syncTaskControls();
 }
 
+function projectAttachmentFields() {
+ const message=config.drive_upload_ready?'保存项目后，附件会自动上传到公司 Google Drive 文件夹。支持 PDF、图片和其他文件，每个最多 20 MB，一次最多 10 个。':currentWorkspace?.id==='company'?'Google Drive 尚未连接，暂时不能上传附件。项目可以先保存，连接后再到项目的“附件”中添加。':'此空间暂未连接专属 Google Drive。保存项目后，可以在“附件”中添加已有文件链接。';
+ return `<fieldset class="project-attachments wide"><legend>项目附件 <span>可选</span></legend><p class="hint">${message}</p><label class="attachment-picker"><span>${icon('file')} 选择附件</span><input type="file" name="project_files" multiple ${config.drive_upload_ready?'':'disabled'} aria-label="选择项目附件" aria-describedby="attachment-help"></label><p class="hint" id="attachment-help">${config.drive_upload_ready?'文件只会在保存项目时上传。':'连接完成后即可使用文件选择。'}</p><ul class="attachment-list" aria-label="已选附件"></ul><p class="attachment-status" role="status" aria-live="polite"></p></fieldset>`;
+}
+
+function bindProjectCreation() {
+ const targetWorkspace=workspaceId;
+ const draft=new CmpProjectAttachments.ProjectAttachmentDraft((path,method,body)=>{
+  if(workspaceId!==targetWorkspace)throw new Error('当前空间已变化，请返回原公司后重试');
+  return api(path,method,body);
+ });
+ const form=$('#editor'),modal=$('#modal'),picker=$('[name=project_files]',form),list=$('.attachment-list',form),status=$('.attachment-status',form),submit=$('[type=submit]',form);
+ const labels={pending:'等待保存',uploading:'正在上传…',done:'已保存到 Drive',failed:'上传未完成'};
+ const update=()=>{
+  modal.dataset.busy=String(draft.busy);
+  for(const control of form.querySelectorAll('input:not([type=file]),select,textarea'))control.disabled=Boolean(draft.body);
+  for(const button of modal.querySelectorAll('[data-action=close-modal]'))button.disabled=draft.busy;
+  picker.disabled=draft.busy||!config.drive_upload_ready;
+  list.innerHTML=draft.files.map(x=>`<li><div><strong>${esc(x.file.name)}</strong><small>${x.file.size<1024*1024?Math.ceil(x.file.size/1024)+' KB':(x.file.size/1024/1024).toFixed(1)+' MB'} · <span class="attachment-${x.status}">${labels[x.status]}</span></small>${x.error?`<p class="attachment-error">${esc(x.error)}</p>`:''}</div>${x.status!=='done'?`<button type="button" class="text-button" data-remove-attachment="${x.key}" aria-label="移除 ${esc(x.file.name)}" ${draft.busy?'disabled':''}>移除</button>`:icon('check')}</li>`).join('');
+  const completed=draft.files.filter(x=>x.status==='done').length;
+  status.textContent=draft.project?(draft.busy?`项目已保存，附件 ${completed} / ${draft.files.length} 已完成。`:'项目已保存。关闭后，未完成的附件需要重新选择。'):draft.busy?'正在保存项目…':draft.body?'保存结果暂未确认，请重试以核对。':'';
+  submit.textContent=draft.busy?(draft.project?'正在上传附件…':'正在保存项目…'):draft.project?(draft.files.some(x=>x.status!=='done')?'重试未完成附件':'打开项目'):draft.body?'重试保存项目':draft.files.length?'保存项目并上传附件':'保存项目';
+ };
+ picker.addEventListener('change',()=>{try{draft.add(picker.files);$('.error',form).textContent='';}catch(error){$('.error',form).textContent=error.message;}picker.value='';update();});
+ list.addEventListener('click',event=>{const button=event.target.closest('[data-remove-attachment]');if(button){draft.remove(button.dataset.removeAttachment);update();}});
+ const cancel=event=>{if(draft.busy)event.preventDefault();};
+ modal.addEventListener('cancel',cancel);
+ const leaving=event=>{if(draft.busy){event.preventDefault();event.returnValue='';}};
+ window.addEventListener('beforeunload',leaving);
+ modal.addEventListener('close',()=>{window.removeEventListener('beforeunload',leaving);modal.removeEventListener('cancel',cancel);delete modal.dataset.busy;},{once:true});
+ bindSubmit(async values=>{
+  const body=Object.fromEntries(values);delete body.project_files;
+  if(config.can_manage_resources)body.member_access=values.getAll('resource_member').map(user_id=>({user_id,role:values.get('resource_role')}));
+  const saved=await draft.save(body,update);
+  view='projects';projectId=saved.id;projectTab=draft.files.length?'files':'notes';subsectionId='';search='';filter='';
+  closeModal();await load();draw();toast(draft.files.length?'项目已保存，附件已上传到 Google Drive':'项目已保存');
+ });
+ update();
+}
+
 function editor(kind,id) {
  if(kind!=='users'&&!(id?canEdit(id):canCreate(kind))){readOnlyRecord(id);return;}
  if(['warehouses','products','stock_movements'].includes(kind)){inventoryEditor(kind,id);return;}
@@ -253,7 +293,9 @@ function editor(kind,id) {
  if(kind==='tasks'&&id) {const linked=byKind('notes').filter(n=>n.linked_task_id===id);if(linked.length)content+=`<section class="wide"><h3>关联笔记</h3>${linked.map(n=>`<button type="button" class="text-button" data-edit="${n.id}">${icon('note')} ${esc(n.title)}</button>`).join('<br>')}</section>`;}
  const uploads=kind==='files'&&!id?`<div class="notice">${config.drive_upload_ready?'可以直接上传文件到公司 Drive 文件夹。':'请添加已有文件链接，并核对文件本身的共享权限。平台权限不会改变 Drive 的共享设置。'} ${config.drive_folder_url?`<a href="${esc(config.drive_folder_url)}" target="_blank" rel="noopener">打开文件夹</a>`:''}</div>${config.drive_upload_ready?'<button class="secondary" data-action="upload-form">从手机 / 电脑上传</button><br><br>':''}`:'';
  if(!id&&['projects','finance_profiles'].includes(kind))content+=newResourceMembers();
+ if(kind==='projects'&&!id)content+=projectAttachmentFields();
  openModal((id?'编辑':'新增')+kindLabels[kind],uploads+formWrap(content)+(id?`<p class="hint">创建：${esc(person(record.created_by))} · ${formatTime(record.created_at)}<br>最近修改：${esc(person(record.updated_by))} · ${formatTime(record.updated_at)}<br><button class="text-button" data-history="${id}">查看修改历史</button></p>`:''));
+ if(kind==='projects'&&!id){bindProjectCreation();return;}
  if(kind==='notes')syncTaskControls();
  if(kind==='transactions') {syncReimbursementFields();if(data.source_import) $('#editor').insertAdjacentHTML('beforebegin',sourceLink(data.source_import));}
  if(kind==='tasks')syncTaskScope();
@@ -269,14 +311,14 @@ function userEditor(id) {
 function passwordForm() {openModal('修改密码',formWrap(field('current_password','当前密码','','password','required autocomplete="current-password"')+field('password','新密码（至少 12 位）','','password','required minlength="12" maxlength="128" autocomplete="new-password"')+field('confirm_password','再次输入新密码','','password','required minlength="12" autocomplete="new-password"'),'修改并重新登录'));bindSubmit(async form=>{if(form.get('password')!==form.get('confirm_password'))throw new Error('两次输入的新密码不一致');await api('/password','POST',Object.fromEntries(form));me=null;closeModal();loginPage();toast('密码已更新，请使用新密码登录');});}
 function account() {openModal('账号与设置',`<div class="account"><span class="avatar">${initials(me.name)}</span><div>${esc(me.name)}<small>${esc(me.username)} · ${me.role==='admin'?'管理员':'团队成员'}</small></div></div><div class="panel"><button class="row clickable" data-action="password"><div class="row-main"><h3>修改密码</h3></div>${icon('arrow')}</button><button class="row clickable" data-view="activity"><div class="row-main"><h3>操作记录</h3></div>${icon('arrow')}</button>${me.role==='admin'?'<button class="row clickable" data-view="users"><div class="row-main"><h3>平台账号管理</h3></div>'+icon('arrow')+'</button>':''}<button class="row clickable" data-view="security"><div class="row-main"><h3>账号安全与维护记录</h3></div>${icon('arrow')}</button><button class="row clickable" data-action="refresh"><div class="row-main"><h3>刷新全部记录</h3></div>${icon('refresh')}</button><button class="row clickable" data-action="logout"><div class="row-main"><h3>退出登录</h3></div>${icon('logout')}</button></div><p class="hint">手机安装：iPhone Safari → 分享 → 添加到主屏幕；Android Chrome → 菜单 → 安装应用。使用时需要网络连接。</p>`);}
 const fieldLabels={source_import:'导入来源',subsection_id:'分区',linked_task_id:'关联待办',title:'标题',name:'姓名',date:'日期',event:'事件',amount:'原币金额',usd_amount:'美元折算金额',currency:'币种',direction:'收支',payment_status:'支付状态',posting_status:'入账状态',booked_amount:'入账金额',payment_method:'付款形式',responsible:'负责人',category:'类别',note:'备注',description:'说明',body:'正文',contact:'联系人',status:'状态',progress:'进度',due_date:'截止日',project_id:'项目',owner_id:'负责人',assignee_id:'负责人',username:'账号',role:'角色',active:'启用',must_change:'需改密码',url:'链接'};
-function auditText(data) {if(!data)return '无';return Object.entries(data).filter(([k])=>!['id','workspace_id','version','updated_at'].includes(k)).map(([k,v])=>`${fieldLabels[k]||k}：${k==='resource_kind'?(kindLabels[v]||v):k==='resource_id'?(data.resource_kind==='finance_profiles'?financeProfileName(v):projectName(v)):k==='user_id'?person(v):k==='role'?accessName(v):k==='ledger_task'?(v?'是':'否'):k==='source_import'?sourceLabel(v):k==='warehouse_id'?warehouseName(v):k==='product_id'?productName(v):k==='linked_transaction_id'?(find(v)?.title||'未关联'):k==='profile_id'?financeProfileName(v):k==='project_id'?projectName(v):k==='subsection_id'?sectionName(v):k==='linked_task_id'?(find(v)?.title||'未关联'):['owner_id','assignee_id'].includes(k)?person(v):v??'未填写'}`).join('\n');}
+function auditText(data) {if(!data)return '无';return Object.entries(data).filter(([k])=>!['id','workspace_id','version','updated_at','upload_sha256','drive_file_id'].includes(k)).map(([k,v])=>`${fieldLabels[k]||k}：${k==='resource_kind'?(kindLabels[v]||v):k==='resource_id'?(data.resource_kind==='finance_profiles'?financeProfileName(v):projectName(v)):k==='user_id'?person(v):k==='role'?accessName(v):k==='ledger_task'?(v?'是':'否'):k==='source_import'?sourceLabel(v):k==='warehouse_id'?warehouseName(v):k==='product_id'?productName(v):k==='linked_transaction_id'?(find(v)?.title||'未关联'):k==='profile_id'?financeProfileName(v):k==='project_id'?projectName(v):k==='subsection_id'?sectionName(v):k==='linked_task_id'?(find(v)?.title||'未关联'):['owner_id','assignee_id'].includes(k)?person(v):v??'未填写'}`).join('\n');}
 fieldLabels.show_on_timeline='加入时间线';
 Object.assign(fieldLabels,{resource_kind:'权限类型',resource_id:'权限对象',user_id:'成员',ledger_task:'账本待办'});
 Object.assign(fieldLabels,{profile_id:'财务账本',reimbursement_status:'报销状态',claim_amount:'应报金额',reimbursed_amount:'累计已报金额',reimbursement_date:'最近报销日期',reimbursement_note:'报销备注'});
 Object.assign(fieldLabels,{warehouse_id:'仓库',product_id:'商品',linked_transaction_id:'关联财务',movement_type:'出入库类型',quantity:'数量',sku:'SKU',unit:'计量单位',low_stock:'低库存提醒线'});
 function showAudit(a) {openModal('修改详情',`<p class="meta">${esc(a.actor_name)} · ${formatTime(a.at)} · ${esc(a.action)}</p><div class="audit-columns"><section><h3>修改前</h3><div class="audit-data">${esc(auditText(a.before))}</div></section><section><h3>修改后</h3><div class="audit-data">${esc(auditText(a.after))}</div></section></div>`);}
 async function history(id) {const data=await api('/activity?entity_id='+encodeURIComponent(id));openModal('这条记录的修改历史',activityList(data));$('#modal').querySelectorAll('[data-audit]').forEach(button=>button.addEventListener('click',e=>{e.stopPropagation();showAudit(data.find(a=>a.id===button.dataset.audit));}));}
-function uploadForm() {if(!canCreate('files')){toast('没有此项目的编辑权限');return;}openModal('上传项目附件',formWrap(projectSelect(projectId||'',true)+sectionSelect(projectId||'',subsectionId==='unassigned'?'':subsectionId)+field('file','文件（最大 20 MB）','','file','required'),'上传到 Google Drive'));bindSubmit(async form=>{if(form.get('file').size>20*1024*1024)throw new Error('文件不能超过 20 MB');await api('/upload','POST',form);closeModal();await load();toast('文件已保存到 Google Drive');});}
+function uploadForm() {const uploadKey=crypto.randomUUID();if(!canCreate('files')){toast('没有此项目的编辑权限');return;}openModal('上传项目附件',formWrap(projectSelect(projectId||'',true)+sectionSelect(projectId||'',subsectionId==='unassigned'?'':subsectionId)+field('file','文件（最大 20 MB）','','file','required'),'上传到 Google Drive'));bindSubmit(async form=>{if(form.get('file').size>20*1024*1024)throw new Error('文件不能超过 20 MB');form.set('upload_key',uploadKey);await api('/upload','POST',form);closeModal();await load();toast('文件已保存到 Google Drive');});}
 function loginPage() {loadEpoch++;workspaceId='';maintenanceId='';currentWorkspace=null;records=[];people=[];events=[];allAccounts=[];accountEvents=[];maintenanceItems=[];lastSnapshot=null;clearTimeout(maintenanceTimer);clearInterval(refreshTimer);$('#root').innerHTML=`<main class="login-shell"><section class="login-intro"><img src="/static/icon.svg" alt="Company Manager"><h1>公司的工作，<br>一起记录。</h1><p>从一笔收支到一个项目。<br>让进度、沟通和每次更新都有迹可循。</p></section><section class="login-form-wrap"><form id="login" class="login-form"><h2>登录公司工作台</h2><p class="subtle">使用管理员分配给你的账号。</p>${field('username','账号','','text','required autocomplete="username" autocapitalize="none"')}${field('password','密码','','password','required autocomplete="current-password"')}<p class="error" role="alert"></p><button class="primary" type="submit">登录</button><p class="hint">忘记密码？请联系管理员 Kevin 重置。</p></form></section></main>`;$('#login').addEventListener('submit',async e=>{e.preventDefault();const f=e.currentTarget,b=$('button',f);b.disabled=true;try{me=await api('/login','POST',Object.fromEntries(new FormData(f)));view='home';projectId=null;search='';filter='';if(me.must_change){forcePassword();}else{await load();startRefresh();}}catch(error){$('.error',f).textContent=error.message;}finally{b.disabled=false;}});}
 function forcePassword() {$('#root').innerHTML='<div class="loading">首次登录，请修改初始密码后开始使用。</div>';passwordForm();}
 function startRefresh() {clearInterval(refreshTimer);refreshTimer=setInterval(()=>{if(me&&!document.hidden&&!$('#modal').open&&!search)(maintenanceId?checkMaintenanceAccess():load()).catch(()=>{});},30000);}
