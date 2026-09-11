@@ -60,7 +60,7 @@ function applyWorkspaceAccess() {
 function readOnlyRecord(id) {
  const r=find(id);if(!r){toast('只读空间不能新增记录');return;}
  const data=Object.fromEntries(Object.entries(r).filter(([k])=>!['id','kind','version','workspace_id','created_at','updated_at','created_by','updated_by'].includes(k)));
- openModal('查看'+kindLabels[r.kind],`<p class="hint">你对此记录只有查看权限。</p><div class="audit-data">${esc(auditText(data))}</div><p class="hint">${esc(person(r.updated_by))} · ${formatTime(r.updated_at)}</p><button class="text-button" data-history="${r.id}">查看修改记录</button>`);
+ openModal('查看'+kindLabels[r.kind],`<p class="hint">你对此记录只有查看权限。</p><div class="audit-data">${esc(auditText(data))}</div>${r.kind==='notes'?noteAttachments(r):''}<p class="hint">${esc(person(r.updated_by))} · ${formatTime(r.updated_at)}</p><button class="text-button" data-history="${r.id}">查看修改记录</button>`);
 }
 function teamPage() {
  if(currentWorkspace?.kind!=='team')return empty('请先选择公司空间','个人空间没有团队成员。');

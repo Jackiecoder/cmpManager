@@ -849,6 +849,14 @@ def validate(kind, data, c, uploaded=False):
             if not section or json.loads(section['data'])['project_id'] != out.get('project_id'):
                 fail('分区不存在或不属于所选项目')
     if kind == 'notes':
+        attachments = data.get('attachment_ids', [])
+        if not isinstance(attachments, list) or len(attachments) > 50 or any(not isinstance(key, str) or not 1 <= len(key) <= 80 for key in attachments):
+            fail('附件关联格式无效，每条沟通记录最多关联 50 份附件')
+        out['attachment_ids'] = list(dict.fromkeys(attachments))
+        for key in out['attachment_ids']:
+            attachment = c.records("id=? AND kind='files'", (key,)).fetchone()
+            if not attachment or json.loads(attachment['data']).get('project_id') != out['project_id']:
+                fail('只能关联同一项目中的附件')
         out['show_on_timeline'] = data.get('show_on_timeline', True)
         if not isinstance(out['show_on_timeline'], bool):
             fail('加入时间线必须为是或否')
@@ -1024,13 +1032,16 @@ def create_record(kind: str, body: dict, request: Request):
         scope_request(c, request, user, write=True)
         authorize_record(c, kind, body, write=True, creating=True)
         item_id = None
-        if kind == 'projects' and body.get('creation_key'):
-            item_id = request_record_id(c.workspace_id, user['id'], 'projects', body['creation_key'])
-            existing = c.records('id=? AND kind=?', (item_id, kind), include_deleted=True).fetchone()
+        if kind in ('projects', 'notes') and body.get('creation_key'):
+            item_id = request_record_id(c.workspace_id, user['id'], kind, body['creation_key'])
+            existing = c.records('id=? AND kind=?', (item_id, kind), internal=True).fetchone()
             if existing:
                 if json.loads(existing['data']).get('deleted_at'): fail('该项目已删除，请重新打开新建项目表单', 409)
+                authorize_record(c, kind, json.loads(existing['data']), item_id, write=True)
+                if kind == 'notes' and json.loads(existing['data'])['project_id'] != body.get('project_id'):
+                    fail('沟通记录已移动，请刷新后查看', 409)
                 return present_record(c, existing)
-        if kind == 'projects' and body.get('with_attachments'):
+        if kind in ('projects', 'notes') and body.get('with_attachments'):
             require_storage()
         data = prepare_record(c, kind, body, user)
         if kind == 'products': check_product(c, data)
@@ -1056,7 +1067,7 @@ def update_record(kind: str, item_id: str, body: dict, request: Request):
         c.existing = (kind, before)
         data = prepare_record(c, kind, {**before, **body}, user)
         if kind == 'files':
-            for key in ('drive_file_id', *STORED_FILE_FIELDS):
+            for key in ('drive_file_id', 'upload_note_id', *STORED_FILE_FIELDS):
                 if key in before: data[key] = before[key]
         authorize_record(c, kind, data, item_id, write=True)
         if kind == 'products': check_product(c, data, item_id, before)
@@ -1074,6 +1085,10 @@ def update_record(kind: str, item_id: str, body: dict, request: Request):
             for note in c.records("kind='notes'", columns='data', internal=True).fetchall():
                 if json.loads(note['data']).get('linked_task_id') == item_id:
                     fail('此待办已关联笔记，请先解除关联再更换项目')
+        if kind == 'files' and data['project_id'] != before['project_id']:
+            for note in c.records("kind='notes'", columns='data', internal=True).fetchall():
+                if item_id in json.loads(note['data']).get('attachment_ids', []):
+                    fail('此附件已关联沟通记录，请先解除关联再更换项目')
         result = c.execute('UPDATE entities SET data=?, version=version+1, updated_at=?, updated_by=? WHERE id=? AND version=? AND workspace_id=?', (json.dumps(data, ensure_ascii=False), now(), user['id'], item_id, row['version'], c.workspace_id))
         if result.rowcount != 1: fail('记录已被更新，请刷新', 409)
         audit(c, user['id'], '修改', kind, item_id, before, data)
@@ -1112,14 +1127,39 @@ def require_storage():
     if not STORAGE_BUCKET: fail('附件存储尚未配置，请联系管理员', 503)
 
 
+def upload_note(c, note_id, project_id, subsection_id):
+    if not note_id: return None
+    row = c.records("id=? AND kind='notes'", (note_id,)).fetchone()
+    if not row: fail('沟通记录不存在或无权访问', 404)
+    data = json.loads(row['data'])
+    authorize_record(c, 'notes', data, note_id, write=True)
+    if data['project_id'] != project_id or data.get('subsection_id', '') != subsection_id:
+        fail('沟通记录的项目或分区已变化，请刷新后重新上传', 409)
+    return row
+
+
+def attach_uploaded_file(c, note, file_id, actor):
+    if not note: return
+    before = json.loads(note['data'])
+    attachments = before.get('attachment_ids', [])
+    if file_id in attachments: return
+    if len(attachments) >= 50: fail('每条沟通记录最多关联 50 份附件')
+    after = {**before, 'attachment_ids': [*attachments, file_id]}
+    result = c.execute('UPDATE entities SET data=?,version=version+1,updated_at=?,updated_by=? WHERE id=? AND version=? AND workspace_id=?',
+                       (json.dumps(after, ensure_ascii=False), now(), actor, note['id'], note['version'], c.workspace_id))
+    if result.rowcount != 1: fail('沟通记录已更新，请重试上传', 409)
+    audit(c, actor, '关联附件', 'notes', note['id'], before, after)
+
+
 @app.post('/api/upload')
-def upload(request: Request, project_id: str = Form(...), file: UploadFile = File(...), subsection_id: str = Form(''), upload_key: str = Form('')):
+def upload(request: Request, project_id: str = Form(...), file: UploadFile = File(...), subsection_id: str = Form(''), upload_key: str = Form(''), note_id: str = Form('')):
     user = current_user(request)
     fields = {'title': '附件', 'project_id': project_id, 'subsection_id': subsection_id}
     with db() as c:
         scope_request(c, request, user, write=True)
         authorize_record(c, 'files', fields, write=True, creating=True)
         validate('files', fields, c, uploaded=True)
+        upload_note(c, note_id, project_id, subsection_id)
     require_storage()
     content = file.file.read(attachment_storage.MAX_BYTES + 1)
     if len(content) > attachment_storage.MAX_BYTES: fail('文件不能超过 20 MB', 413)
@@ -1137,12 +1177,17 @@ def upload(request: Request, project_id: str = Form(...), file: UploadFile = Fil
         user = current_user(request, connection=c)
         scope_request(c, request, user, write=True)
         authorize_record(c, 'files', fields, write=True, creating=True)
+        note = upload_note(c, note_id, project_id, subsection_id)
         existing = c.records("id=? AND kind='files'", (item_id,)).fetchone()
         if existing:
             previous = json.loads(existing['data'])
-            if previous.get('upload_sha256') != digest or previous.get('project_id') != project_id or previous.get('subsection_id', '') != subsection_id:
+            if previous.get('upload_sha256') != digest or previous.get('project_id') != project_id or previous.get('subsection_id', '') != subsection_id or previous.get('upload_note_id', '') != note_id:
                 fail('此附件已保存或移动，请刷新项目后检查', 409)
+            if note and item_id not in json.loads(note['data']).get('attachment_ids', []):
+                fail('此附件与沟通记录的关联已解除，请刷新后按需重新关联', 409)
             return present_record(c, existing)
+        if note and len(json.loads(note['data']).get('attachment_ids', [])) >= 50:
+            fail('每条沟通记录最多关联 50 份附件')
         name = attachment_storage.object_name(c.workspace_id, item_id)
         try:
             stored = attachment_storage.store(STORAGE_BUCKET, name, content, mime, digest)
@@ -1154,9 +1199,12 @@ def upload(request: Request, project_id: str = Form(...), file: UploadFile = Fil
         user = current_user(request, connection=c)
         scope_request(c, request, user, write=True)
         authorize_record(c, 'files', fields, write=True, creating=True)
+        note = upload_note(c, note_id, project_id, subsection_id)
         data = validate('files', fields, c, uploaded=True)
         data.update(stored, filename=filename, url='/api/files/' + item_id + '/content')
+        if note_id: data['upload_note_id'] = note_id
         insert_record(c, 'files', data, user['id'], item_id=item_id)
+        attach_uploaded_file(c, note, item_id, user['id'])
         return present_record(c, c.records('id=?', (item_id,)).fetchone())
 
 
