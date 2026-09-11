@@ -1,5 +1,16 @@
 # 部署记录
 
+## 2026-09-10：私有附件与应用内预览
+
+- 已发布 `cmpmanager-00013-f9q`，100% 流量；仅更新专属 `cmpmanager` 服务。
+- 新附件使用 GCS 私有 bucket，位于 `us-central1`。启用 Uniform bucket-level access、Public access prevention 和 7 天 soft delete。后台仅获对象创建和读取权限。Google Drive OAuth 不再用于上传，已撤销后台对旧客户端凭据的读取权限。
+- PDF 在应用内翻页和缩放；PNG/JPEG/GIF/WebP、UTF-8 文本直接预览，其他格式可下载。文件内容通过服务端授权接口提供；旧 Drive/Docs 链接继续在原网站打开。
+- 132 项 Python 测试（含独立 PostgreSQL 非超级管理员/RLS 环境）和 14 项 JavaScript 测试通过。覆盖上传重试、原子审计、权限在网络读取中途被撤销、跨公司/个人空间隔离、伪造存储字段和内容完整性。
+- 本机独立测试数据库结合真实 GCS 完成 PDF/图片/文本上传、重读和下载；下载原文件哈希一致。390 × 844 手机和 1280 × 900 桌面预览验收通过，无控制台错误。生产业务记录未加入测试数据。
+- 线上健康检查和全部核心预览文件哈希一致，未登录上传/读取均返回 401；匿名直接访问 GCS 测试对象被拒绝。线上浏览器当前无登录会话，未使用生产账号新建测试项目。
+
+## 历史部署记录
+
 验证日期：2026-09-06（America/New_York）。
 
 - GCP project：`iportfolio-497808`

@@ -1,0 +1,2 @@
+# Preserve upstream renderer and license bytes, and exclude vendor whitespace.
+static/vendor/pdfjs/** -whitespace linguist-vendored=true
