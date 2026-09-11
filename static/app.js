@@ -133,7 +133,8 @@ function attachmentLink(file) {return file.storage_provider==='gcs'?`<button cla
 function fileNoteLinks(file) {const notes=linkedNotes(file.id);return notes.length?`<div class="file-note-links"><span>关联沟通：</span>${notes.map(n=>`<button class="text-button" data-edit="${n.id}">${esc(n.title)}</button>`).join('')}</div>`:'';}
 function noteAttachments(note) {
  const files=(note.attachment_ids||[]).map(find).filter(Boolean);
- return `<section class="note-file-links" aria-label="沟通附件"><div class="spread"><h4>附件${files.length?' · '+files.length:''}</h4>${canEdit(note.id)?`<button class="text-button" data-note-files="${note.id}">管理附件</button>`:''}</div>${files.length?files.map(attachmentLink).join(''):'<p class="hint">暂无关联附件</p>'}</section>`;
+ if(!files.length)return '';
+ return `<section class="note-file-links" aria-label="沟通附件"><div class="spread"><h4>附件 · ${files.length}</h4>${canEdit(note.id)?`<button class="text-button" data-note-files="${note.id}">管理附件</button>`:''}</div>${files.map(attachmentLink).join('')}</section>`;
 }
 const fileSize=n=>n>=1048576?(n/1048576).toFixed(1)+' MB':Math.max(1,Math.ceil(n/1024))+' KB';
 function fileRow(f) {if(f.storage_provider!=='gcs')return legacyFileRow(f);return `<div class="row">${icon('file')}<div class="row-main"><h3><button class="file-title" data-preview-file="${f.id}">${esc(f.title)}</button></h3><p class="file-meta">${esc(sectionName(f.subsection_id))} · ${esc(person(f.created_by))} · ${formatTime(f.created_at)} · ${fileSize(f.size||0)}</p>${fileNoteLinks(f)}</div><div class="file-actions"><button class="text-button" data-preview-file="${f.id}">预览</button>${canEdit(f.id)?`<button class="text-button" data-edit="${f.id}">编辑</button>`:''}</div></div>`;}
