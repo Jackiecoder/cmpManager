@@ -9,3 +9,18 @@ dialog.file-preview-dialog{width:min(1100px,calc(100% - 32px));max-width:1100px;
 @media(max-width:700px){dialog.file-preview-dialog{width:100%;max-width:none;height:100dvh;max-height:100dvh;margin:0;border-radius:0;padding:calc(14px + env(safe-area-inset-top)) 12px calc(14px + env(safe-area-inset-bottom))}.file-preview-dialog .dialog-head h2{font-size:17px}.file-preview-dialog .dialog-head{gap:8px}.preview-toolbar .secondary{padding:8px 12px;white-space:nowrap}.pdf-controls{gap:6px}.pdf-controls select{min-width:105px;font-size:14px;padding:8px}.pdf-controls button{padding:8px 10px;font-size:13px}.file-preview-body{height:calc(100% - 114px)}.preview-stage{padding:10px}.file-actions{gap:4px}}
 
 dialog.file-preview-dialog[open]{display:flex;flex-direction:column}.file-preview-dialog .dialog-head,.preview-toolbar{flex:none}.file-preview-dialog .file-preview-body{height:auto;flex:1;min-height:0}
+
+/* Drive links remain external, while sharing the project's attachment views. */
+.drive-link-card{display:flex;align-items:center;gap:12px;border:1px solid #d9e5ed;border-radius:12px;padding:13px 14px;background:#f5fafc;text-decoration:none;color:var(--ink);min-width:0;max-width:100%;box-sizing:border-box}
+.drive-link-card:hover{background:#eaf4f8;border-color:#8ab2c8}
+.drive-link-card:focus-visible{outline:2px solid var(--blue);outline-offset:3px}
+.drive-link-icon{display:grid;place-items:center;flex:0 0 32px;height:36px;background:#fff;border-radius:8px;color:var(--blue)}
+.drive-link-text{display:flex;flex-direction:column;gap:5px;flex:1;min-width:0;overflow-wrap:anywhere}
+.drive-link-text strong{font-size:14px;line-height:1.5}
+.drive-link-text small{font-size:11px;color:var(--muted);line-height:1.5}
+.note-file-links .drive-link-card{display:flex}
+.timeline-content{min-width:0}
+.timeline-drive-links{display:grid;gap:8px;margin:12px 0 0 16px}
+.drive-file-row{align-items:flex-start}
+.attachment-source-tabs{margin:0 0 18px}
+@media(max-width:700px){.timeline-drive-links{margin-left:12px}.drive-link-card{gap:8px;padding:11px}.drive-file-row{flex-wrap:wrap}.drive-file-row .row-main{flex-basis:100%}}

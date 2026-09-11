@@ -11,7 +11,7 @@
    const additions=Array.from(files).filter(file=>!this.files.some(x=>x.file.name===file.name&&x.file.size===file.size&&x.file.lastModified===file.lastModified));
    if(this.files.length+additions.length>MAX_FILES)throw new Error('一次最多选择 10 个附件');
    const oversized=additions.find(file=>file.size>MAX_BYTES);
-   if(oversized)throw new Error(oversized.name+' 超过 20 MB，请选择较小的文件');
+   if(oversized)throw new Error(oversized.name+' 超过 20 MB，请上传到 Google Drive 后在项目附件中添加链接');
    this.files.push(...additions.map(file=>({key:this.makeKey(),file,status:'pending',error:''})));
   }
   remove(key) {if(!this.busy)this.files=this.files.filter(x=>x.key!==key||x.status==='done');}

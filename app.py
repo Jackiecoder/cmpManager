@@ -837,8 +837,14 @@ def validate(kind, data, c, uploaded=False):
             url = ''
         else:
             url = text_field(data, 'url', 2000, True)
-            parsed = urlparse(url)
-            if parsed.scheme != 'https' or parsed.hostname not in ('drive.google.com', 'docs.google.com'): fail('请使用 Google Drive 或 Google Docs 的 HTTPS 链接')
+            try:
+                parsed = urlparse(url)
+                valid = (parsed.scheme == 'https' and parsed.hostname in ('drive.google.com', 'docs.google.com')
+                         and not parsed.username and not parsed.password and parsed.port in (None, 443)
+                         and not re.search(r'[\\\s]', url))
+            except ValueError:
+                valid = False
+            if not valid: fail('请使用 Google Drive 或 Google Docs 的 HTTPS 分享链接')
         out = {'title': text_field(data, 'title', 200, True), 'url': url, 'project_id': text_field(data, 'project_id', 80, True)}
     else: fail('记录类型无效', 404)
     if out.get('project_id') and not reference_record(c, 'project_id', out['project_id'], 'projects'): fail('关联项目不存在')
@@ -1032,7 +1038,7 @@ def create_record(kind: str, body: dict, request: Request):
         scope_request(c, request, user, write=True)
         authorize_record(c, kind, body, write=True, creating=True)
         item_id = None
-        if kind in ('projects', 'notes') and body.get('creation_key'):
+        if kind in ('projects', 'notes', 'files') and body.get('creation_key'):
             item_id = request_record_id(c.workspace_id, user['id'], kind, body['creation_key'])
             existing = c.records('id=? AND kind=?', (item_id, kind), internal=True).fetchone()
             if existing:
@@ -1040,13 +1046,28 @@ def create_record(kind: str, body: dict, request: Request):
                 authorize_record(c, kind, json.loads(existing['data']), item_id, write=True)
                 if kind == 'notes' and json.loads(existing['data'])['project_id'] != body.get('project_id'):
                     fail('沟通记录已移动，请刷新后查看', 409)
+                if kind == 'files':
+                    saved = json.loads(existing['data'])
+                    if (saved.get('storage_provider') == 'gcs' or saved['project_id'] != body.get('project_id')
+                            or saved['url'] != body.get('url') or saved.get('link_note_id', '') != body.get('note_id', '')):
+                        fail('链接已变化，请关闭窗口后重新添加', 409)
+                    validate('files', saved, c)
+                    note = upload_note(c, saved.get('link_note_id', ''), saved['project_id'], saved.get('subsection_id', ''))
+                    if note and item_id not in json.loads(note['data']).get('attachment_ids', []):
+                        fail('附件关联已解除，请在沟通记录中重新选择', 409)
                 return present_record(c, existing)
         if kind in ('projects', 'notes') and body.get('with_attachments'):
             require_storage()
         data = prepare_record(c, kind, body, user)
+        linked_note = None
+        if kind == 'files':
+            note_id = text_field(body, 'note_id', 80)
+            linked_note = upload_note(c, note_id, data['project_id'], data.get('subsection_id', ''))
+            if linked_note: data['link_note_id'] = note_id
         if kind == 'products': check_product(c, data)
         if kind == 'stock_movements': check_stock_balance(c, data)
         item_id = insert_record(c, kind, data, user['id'], item_id=item_id)
+        if linked_note: attach_uploaded_file(c, linked_note, item_id, user['id'])
         if kind in ('projects', 'finance_profiles') and 'member_access' in body:
             apply_resource_members(c, user, kind, item_id, body['member_access'])
         return present_record(c, c.records('id=?', (item_id,)).fetchone())
@@ -1067,7 +1088,7 @@ def update_record(kind: str, item_id: str, body: dict, request: Request):
         c.existing = (kind, before)
         data = prepare_record(c, kind, {**before, **body}, user)
         if kind == 'files':
-            for key in ('drive_file_id', 'upload_note_id', *STORED_FILE_FIELDS):
+            for key in ('drive_file_id', 'upload_note_id', 'link_note_id', *STORED_FILE_FIELDS):
                 if key in before: data[key] = before[key]
         authorize_record(c, kind, data, item_id, write=True)
         if kind == 'products': check_product(c, data, item_id, before)

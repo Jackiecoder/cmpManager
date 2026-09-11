@@ -76,7 +76,7 @@ function draw() {
 function renderPage() {return ({home:homePage,projects:projectsPage,inventory:inventoryPage,finance:financePage,tasks:tasksPage,activity:activityPage,users:usersPage,team:teamPage,security:securityPage}[view]||homePage)();}
 function projectCard(p) {
  const latest = CmpTimeline.notesForProject(records, p.id)[0];
- const attachmentCount = byKind('files').filter(f=>f.project_id===p.id).length;
+ const attachmentCount = CmpDriveLinks.projectFiles(records,p.id).length;
  return `<button class="project-card" data-project="${p.id}"><div class="spread"><h3>${esc(p.title)}</h3>${badge(p.status)}</div><p>${esc(p.description || '还没有项目说明')}</p>
  <div class="card-timeline"><span class="meta">最近时间线</span>${latest ? `<div class="card-timeline-entry" data-timeline-project="${p.id}" data-timeline-section="${esc(latest.subsection_id||'')}"><span class="timeline-section">${esc(sectionName(latest.subsection_id))} · <time datetime="${esc(latest.date)}">${esc(latest.date)}</time></span><strong>${esc(latest.title)}</strong></div>` : '<span class="meta">暂无时间线记录</span>'}</div>
  <div class="spread meta"><span>${p.due_date?esc(p.due_date)+' 截止':'未设截止日'}</span><span class="card-resource-counts">${attachmentCount?`<span class="card-attachment-count">${icon('file')} ${attachmentCount} 个附件</span>`:''}<span>${byKind('tasks').filter(t=>t.project_id===p.id&&t.status!=='已完成').length} 项待办</span></span></div></button>`;
@@ -101,12 +101,12 @@ function projectTimeline(project) {
    <div class="timeline-legend">${legend.filter(([id]) => notes.some(n => (n.subsection_id||'')===id)).map(([id,title]) => `<span data-timeline-section="${esc(id)}"><i aria-hidden="true"></i>${esc(title)}</span>`).join('')}</div>
    ${notes.length ? `<ol class="project-timeline-list" tabindex="0" aria-label="按沟通日期排列的笔记">${notes.map(n => `<li data-timeline-section="${esc(n.subsection_id||'')}">
      <time datetime="${esc(n.date)}">${esc(n.date)}</time>
-     <button class="timeline-note" data-edit="${n.id}" aria-label="查看笔记：${esc(n.title)}">
+     <div class="timeline-content"><button class="timeline-note" data-edit="${n.id}" aria-label="查看笔记：${esc(n.title)}">
        <span class="timeline-section">${esc(sectionName(n.subsection_id))}</span>
        <strong>${esc(n.title)}</strong>
-       <span class="timeline-excerpt">${esc(n.body.slice(0,140))}${n.body.length>140?'…':''}</span>
+       <span class="timeline-excerpt">${esc(CmpDriveLinks.bodyText(n.body).slice(0,140))}${CmpDriveLinks.bodyText(n.body).length>140?'…':''}</span>
        <span class="meta">${n.contact?esc(n.contact)+' · ':''}${esc(person(n.created_by))}</span>
-     </button></li>`).join('')}</ol>` : '<p class="timeline-empty">暂无时间线记录。添加笔记时勾选“加入项目时间线”，就会显示在这里。</p>'}
+     </button>${timelineDriveLinks(n)}</div></li>`).join('')}</ol>` : '<p class="timeline-empty">暂无时间线记录。添加笔记时勾选“加入项目时间线”，就会显示在这里。</p>'}
  </section>`;
 }
 function applyTimelineColors() {
@@ -120,26 +120,42 @@ function applyTimelineColors() {
 }
 function projectPage() {
  const p=find(projectId);if(!p){projectId=null;return projectsPage();}
- const items=byKind(projectTab).filter(r=>r.project_id===p.id && inSection(r));
+ const items=projectItems(projectTab,p.id);
  const sections=byKind('subsections').filter(r=>r.project_id===p.id);
  const currentSection=sections.find(r=>r.id===subsectionId);
  const sectionBar=`<section class="subsections"><div class="section-title"><h2>项目分区</h2><button class="text-button" data-new="subsections">${icon('plus')} 新建分区</button></div><nav class="section-options" aria-label="项目分区">${[['','全部记录'],['unassigned','未分区'],...sections.map(r=>[r.id,r.title])].map(([id,title])=>`<button data-section="${id}" class="${subsectionId===id?'active':''}" aria-pressed="${subsectionId===id}">${esc(title)}</button>`).join('')}</nav>${currentSection?`<div class="spread"><p class="hint">${esc(currentSection.description||currentSection.title)}</p><button class="text-button" data-edit="${currentSection.id}">编辑分区</button></div>`:'<p class="hint">按店家、工厂或工作类别，把项目记录分开管理。</p>'}</section>`;
  return `<button class="back" data-action="back-projects">${icon('back')} 全部项目</button>
  <div class="panel detail-head"><div class="spread">${badge(p.status)}<div class="project-actions"><button class="text-button" data-edit="${p.id}">编辑项目</button>${config.full_edit?`<button class="text-button danger-text" data-delete-project="${p.id}">删除项目</button>`:''}</div></div><h2>${esc(p.title)}</h2>${resourceMembersButton('projects',p.id)}<p>${esc(p.description||'还没有项目说明')}</p>${projectTimeline(p)}</div>
- ${sectionBar}<nav class="detail-tabs" aria-label="项目内容">${[['notes','沟通笔记'],['tasks','待办'],['files','附件'],['stock_movements','库存'],['transactions','收支']].filter(([k])=>k!=='transactions'||config.finance_access).map(([k,v])=>`<button data-tab="${k}" class="${projectTab===k?'active':''}">${v} ${byKind(k).filter(x=>x.project_id===p.id && inSection(x)).length}</button>`).join('')}</nav><div class="section-title"><h2>${{notes:'沟通与进展',tasks:'项目待办',files:'项目资料',stock_movements:'项目出入库',transactions:'项目收支'}[projectTab]}</h2><button class="primary" data-new="${projectTab}">${icon('plus')} 添加</button></div>${projectTab==='stock_movements'?`<p class="hint">这里展示当前项目与分区的出入库流水；${config.full_access?'仓库的实际可用余额请在“库存”中查看。':'公司总库存请联系公司 Admin 查看。'}</p>`:''}${projectTab==='files'&&!config.upload_ready?'<div class="notice">此空间暂不支持直接上传。可以添加已有文件链接；请核对文件本身的共享权限，平台权限不会改变 Drive 的共享设置。</div>':''}${items.length?projectTab==='notes'?items.map(noteCard).join(''):`<div class="panel">${projectTab==='stock_movements'?stockMovementList(items):items.map(projectTab==='tasks'?taskRow:projectTab==='transactions'?transactionRow:fileRow).join('')}</div>`:`<div class="panel">${empty('暂无'+kindLabels[projectTab],'点击添加，把这个项目的实际信息记录下来。',null,null,projectTab==='files'?'file':'note')}</div>`}`;
+ ${sectionBar}<nav class="detail-tabs" aria-label="项目内容">${[['notes','沟通笔记'],['tasks','待办'],['files','附件'],['stock_movements','库存'],['transactions','收支']].filter(([k])=>k!=='transactions'||config.finance_access).map(([k,v])=>`<button data-tab="${k}" class="${projectTab===k?'active':''}">${v} ${projectItems(k,p.id).length}</button>`).join('')}</nav><div class="section-title"><h2>${{notes:'沟通与进展',tasks:'项目待办',files:'项目资料',stock_movements:'项目出入库',transactions:'项目收支'}[projectTab]}</h2><button class="primary" data-new="${projectTab}">${icon('plus')} 添加</button></div>${projectTab==='stock_movements'?`<p class="hint">这里展示当前项目与分区的出入库流水；${config.full_access?'仓库的实际可用余额请在“库存”中查看。':'公司总库存请联系公司 Admin 查看。'}</p>`:''}${projectTab==='files'&&!config.upload_ready?'<div class="notice">此空间暂不支持直接上传。可以添加已有文件链接；请核对文件本身的共享权限，平台权限不会改变 Drive 的共享设置。</div>':''}${items.length?projectTab==='notes'?items.map(noteCard).join(''):`<div class="panel">${projectTab==='stock_movements'?stockMovementList(items):items.map(projectTab==='tasks'?taskRow:projectTab==='transactions'?transactionRow:fileRow).join('')}</div>`:`<div class="panel">${empty('暂无'+kindLabels[projectTab],'点击添加，把这个项目的实际信息记录下来。',null,null,projectTab==='files'?'file':'note')}</div>`}`;
 }
-function noteCard(n) {return `<article class="note"><div class="spread"><h3>${esc(n.title)}</h3><button class="text-button" data-edit="${n.id}">编辑</button></div><p class="meta">${esc(sectionName(n.subsection_id))} · ${esc(n.date)}${n.contact?' · 与 '+esc(n.contact)+' 沟通':''}</p><div class="note-body">${esc(n.body)}</div>${noteAttachments(n)}${n.linked_task_id&&find(n.linked_task_id)?`<div class="linked-task"><button class="text-button" data-edit="${n.linked_task_id}">${icon('tasks')} ${esc(find(n.linked_task_id).title)}</button>${badge(find(n.linked_task_id).status)}</div>`:''}<p class="meta">${esc(person(n.updated_by))} · ${formatTime(n.updated_at)} <button class="text-button" data-history="${n.id}">修改记录</button></p></article>`;}
+function noteCard(n) {return `<article class="note"><div class="spread"><h3>${esc(n.title)}</h3><button class="text-button" data-edit="${n.id}">编辑</button></div><p class="meta">${esc(sectionName(n.subsection_id))} · ${esc(n.date)}${n.contact?' · 与 '+esc(n.contact)+' 沟通':''}</p><div class="note-body">${esc(CmpDriveLinks.bodyText(n.body))}</div>${noteAttachments(n)}${n.linked_task_id&&find(n.linked_task_id)?`<div class="linked-task"><button class="text-button" data-edit="${n.linked_task_id}">${icon('tasks')} ${esc(find(n.linked_task_id).title)}</button>${badge(find(n.linked_task_id).status)}</div>`:''}<p class="meta">${esc(person(n.updated_by))} · ${formatTime(n.updated_at)} <button class="text-button" data-history="${n.id}">修改记录</button></p></article>`;}
 function linkedNotes(fileId) {return byKind('notes').filter(n=>n.attachment_ids?.includes(fileId));}
-function attachmentLink(file) {return file.storage_provider==='gcs'?`<button class="text-button" data-preview-file="${file.id}">${icon('file')} ${esc(file.title)}</button>`:`<a href="${esc(file.url)}" target="_blank" rel="noopener">${icon('file')} ${esc(file.title)}</a>`;}
-function fileNoteLinks(file) {const notes=linkedNotes(file.id);return notes.length?`<div class="file-note-links"><span>关联沟通：</span>${notes.map(n=>`<button class="text-button" data-edit="${n.id}">${esc(n.title)}</button>`).join('')}</div>`:'';}
+function attachmentLink(file) {if(CmpDriveLinks.parse(file.url))return driveLinkCard(file);return file.storage_provider==='gcs'?`<button class="text-button" data-preview-file="${file.id}">${icon('file')} ${esc(file.title)}</button>`:`<a href="${esc(file.url)}" target="_blank" rel="noopener">${icon('file')} ${esc(file.title)}</a>`;}
+function fileNoteLinks(file) {const notes=file.source_note_ids?file.source_note_ids.map(find).filter(Boolean):linkedNotes(file.id);return notes.length?`<div class="file-note-links"><span>关联沟通：</span>${notes.map(n=>`<button class="text-button" data-edit="${n.id}">${esc(n.title)}</button>`).join('')}</div>`:'';}
 function noteAttachments(note) {
- const files=(note.attachment_ids||[]).map(find).filter(Boolean);
+ const files=CmpDriveLinks.noteFiles(records,note);
  if(!files.length)return '';
  return `<section class="note-file-links" aria-label="沟通附件"><div class="spread"><h4>附件 · ${files.length}</h4>${canEdit(note.id)?`<button class="text-button" data-note-files="${note.id}">管理附件</button>`:''}</div>${files.map(attachmentLink).join('')}</section>`;
 }
 const fileSize=n=>n>=1048576?(n/1048576).toFixed(1)+' MB':Math.max(1,Math.ceil(n/1024))+' KB';
 function fileRow(f) {if(f.storage_provider!=='gcs')return legacyFileRow(f);return `<div class="row">${icon('file')}<div class="row-main"><h3><button class="file-title" data-preview-file="${f.id}">${esc(f.title)}</button></h3><p class="file-meta">${esc(sectionName(f.subsection_id))} · ${esc(person(f.created_by))} · ${formatTime(f.created_at)} · ${fileSize(f.size||0)}</p>${fileNoteLinks(f)}</div><div class="file-actions"><button class="text-button" data-preview-file="${f.id}">预览</button>${canEdit(f.id)?`<button class="text-button" data-edit="${f.id}">编辑</button>`:''}</div></div>`;}
-function legacyFileRow(f) {return `<div class="row">${icon('file')}<div class="row-main"><h3><a href="${esc(f.url)}" target="_blank" rel="noopener">${esc(f.title)}</a></h3><p>${esc(sectionName(f.subsection_id))} · ${esc(person(f.created_by))} · ${formatTime(f.created_at)}</p>${fileNoteLinks(f)}</div><button class="text-button" data-edit="${f.id}">编辑</button></div>`;}
+function projectItems(kind,project) {
+ const items=kind==='files'?CmpDriveLinks.projectFiles(records,project):byKind(kind).filter(r=>r.project_id===project);
+ return items.filter(r=>inSection(r)||kind==='files'&&r.source_note_ids?.some(id=>find(id)&&inSection(find(id))));
+}
+function driveLinkCard(file) {
+ const link=CmpDriveLinks.parse(file.url);if(!link)return '';
+ return `<a class="drive-link-card" href="${esc(link.url)}" target="_blank" rel="noopener noreferrer" aria-label="在新标签页打开：${esc(file.title)}"><span class="drive-link-icon" aria-hidden="true">${icon('file')}</span><span class="drive-link-text"><strong>${esc(file.title)}</strong><small>Google Drive · ${esc(link.type)} · 在新标签页打开</small></span><span aria-hidden="true">↗</span></a>`;
+}
+function timelineDriveLinks(note) {
+ const files=CmpDriveLinks.noteFiles(records,note).filter(f=>CmpDriveLinks.parse(f.url));
+ return files.length?`<div class="timeline-drive-links" aria-label="时间线 Drive 附件">${files.map(driveLinkCard).join('')}</div>`:'';
+}
+function legacyFileRow(f) {
+ const editId=f.virtual?f.source_note_ids[0]:f.id;
+ return `<div class="row drive-file-row"><div class="row-main">${driveLinkCard(f)||`<h3><a href="${esc(f.url)}" target="_blank" rel="noopener noreferrer">${esc(f.title)}</a></h3>`}<p>${esc(sectionName(f.subsection_id))} · ${f.virtual?'来自沟通内容 · ':''}${esc(person(f.created_by))} · ${formatTime(f.created_at)}</p>${fileNoteLinks(f)}</div>${canEdit(editId)?`<button class="text-button" data-edit="${editId}">${f.virtual?'编辑来源':'编辑'}</button>`:''}</div>`;
+}
+
 function transactionRow(t) {return `<button class="row clickable" data-edit="${t.id}"><div class="row-main"><h3>${esc(t.title)}</h3><p>${esc(t.date||'日期待确认')} · ${esc(t.event||projectName(t.project_id))}</p><p>${esc(t.responsible||person(t.created_by))} · ${esc(t.payment_status)} · ${esc(financeProfileName(t.profile_id))}</p>${reimbursementBadge(t)}</div><div class="amount ${t.direction==='收入'?'income':t.direction==='支出'?'expense':''}">${t.direction==='收入'?'+':t.direction==='支出'?'−':'其他 ' }${cash(t.amount,t.currency)}<small>${t.currency==='CNY'?(t.usd_amount?'折合 '+cash(t.usd_amount):'待确认美元金额'):esc(t.posting_status)}</small></div></button>`;}
 function sourceLabel(source) {return source ? `Google Sheets「${source.sheet_title}」第 ${source.row} 行` : '未记录';}
 function sourceLink(source) {
@@ -271,7 +287,7 @@ function existingNoteFiles(project, selected=[]) {
  return files.length?files.map(f=>`<label class="note-file-choice"><input type="checkbox" name="attachment_ids" value="${f.id}" ${selected.includes(f.id)?'checked':''}><span>${esc(f.title)}<small>${esc(sectionName(f.subsection_id))}</small></span></label>`).join(''):'<p class="hint">此项目暂无已有附件。</p>';
 }
 function noteAttachmentFields(data) {
- return `<fieldset class="project-attachments note-attachment-editor wide"><legend>沟通附件</legend><p class="hint">新文件会关联这条沟通记录，也会显示在项目“附件”中。解除关联不会删除文件。</p><label class="attachment-picker"><span>${icon('file')} 添加新文件</span><input type="file" name="note_files" multiple aria-label="添加沟通附件" ${config.upload_ready?'':'disabled'}></label><p class="hint">${config.upload_ready?'保存记录后上传，每个最多 20 MB，一次最多 10 个。':'暂不能上传新文件，仍可选择已有附件。'}</p><ul class="attachment-list" aria-label="待上传沟通附件"></ul><p class="attachment-status" role="status" aria-live="polite"></p><details class="existing-note-attachments" ${data.attachment_ids?.length?'open':''}><summary>选择项目已有附件</summary><div id="note-existing-files">${existingNoteFiles(data.project_id,data.attachment_ids)}</div></details></fieldset>`;
+ return `<fieldset class="project-attachments note-attachment-editor wide"><legend>沟通附件</legend><p class="hint">新文件会关联这条沟通记录，也会显示在项目“附件”中。解除关联不会删除文件。</p><label class="attachment-picker"><span>${icon('file')} 添加新文件</span><input type="file" name="note_files" multiple aria-label="添加沟通附件" ${config.upload_ready?'':'disabled'}></label><p class="hint">${config.upload_ready?'保存记录后上传，每个最多 20 MB，一次最多 10 个。大文件可在上方沟通内容里粘贴 Google Drive 链接。':'暂不能上传新文件，仍可选择已有附件。'}</p><ul class="attachment-list" aria-label="待上传沟通附件"></ul><p class="attachment-status" role="status" aria-live="polite"></p><details class="existing-note-attachments" ${data.attachment_ids?.length?'open':''}><summary>选择项目已有附件</summary><div id="note-existing-files">${existingNoteFiles(data.project_id,data.attachment_ids)}</div></details></fieldset>`;
 }
 function bindNoteAttachments(record) {
  const targetWorkspace=workspaceId,form=$('#editor'),modal=$('#modal'),picker=$('[name=note_files]',form),list=$('.attachment-list',form),status=$('.attachment-status',form),submit=$('[type=submit]',form);
@@ -346,14 +362,14 @@ function editor(kind,id,externalLink=false) {
  if(kind!=='users'&&!(id?canEdit(id):canCreate(kind))){readOnlyRecord(id);return;}
  if(['warehouses','products','stock_movements'].includes(kind)){inventoryEditor(kind,id);return;}
  if(kind==='users'){userEditor();return;}
- if(kind==='files'&&!id&&config.upload_ready&&!externalLink){uploadForm();return;}
+ if(kind==='files'&&!id){if(config.upload_ready&&!externalLink)uploadForm();else driveLinkForm();return;}
  const record=id?find(id):null, data=record||{date:today(),project_id:projectId||'',subsection_id:subsectionId==='unassigned'?'':subsectionId,profile_id:kind==='transactions'||kind==='tasks'&&view==='finance'?financeProfileId:'',ledger_task:kind==='tasks'&&view==='finance',currency:'USD',direction:'支出'};
  let content='';
  if(kind==='finance_profiles')content=field('title','账本名称',data.title,'text','required maxlength="120" placeholder="例如：公司、商会、业务名称"')+area('description','账本说明',data.description);
  if(kind==='subsections')content=field('title','分区名称',data.title,'text','required maxlength="120" placeholder="例如：店家联系、工厂一联系"')+projectSelect(data.project_id,true)+area('description','分区说明',data.description);
  if(kind==='projects') content=field('title','项目名称',data.title,'text','required maxlength="120"')+select('status','状态',['进行中','待启动','暂停','已完成'],data.status||'进行中')+field('due_date','截止日期',data.due_date,'date')+area('description','项目说明',data.description);
  if(kind==='transactions')content=field('title','事项 / 项目名称',data.title,'text','required maxlength="200"')+field('date','日期（不确定可留空）',data.date,'date')+select('direction','收支',['支出','收入','其他'],data.direction)+select('currency','原币币种',['USD','CNY'],data.currency)+field('amount','原币金额',data.amount,'number','min="0" step="0.01" required')+field('usd_amount','折合美元（人民币流水填写）',data.usd_amount,'number','min="0" step="0.01"')+field('event','事件 / 活动',data.event)+projectSelect(data.project_id)+select('payment_status','支付状态',['未付','已付','部分支付','待确认'],data.payment_status||'未付')+field('payment_method','付款形式',data.payment_method,'text','placeholder="现金、支票、转账…"')+select('posting_status','入账状态',['未入账','平帐','部分入账','待入账','待支出'],data.posting_status||'未入账')+field('booked_amount','入账金额（原币，可为负数）',data.booked_amount,'number','step="0.01"')+field('responsible','负责人',data.responsible)+field('category','类别',data.category)+area('note','备注',data.note);
- if(kind==='notes')content=field('title','笔记标题',data.title,'text','required maxlength="200"')+field('date','沟通日期',data.date,'date','required')+field('contact','客户 / 联系人',data.contact)+projectSelect(data.project_id,true)+area('body','沟通内容与项目进展',data.body,true);
+ if(kind==='notes')content=field('title','笔记标题',data.title,'text','required maxlength="200"')+field('date','沟通日期',data.date,'date','required')+field('contact','客户 / 联系人',data.contact)+projectSelect(data.project_id,true)+area('body','沟通内容与项目进展',data.body,true)+'<p class="hint wide">可直接粘贴 Google Drive 文件、文件夹或 Google 文档链接，保存后会显示为可点击的附件卡片。</p>';
  if(kind==='tasks')content=select('task_scope','待办归属',[['project','项目待办'],...(config.finance_access?[['ledger','账本待办']]:[])],data.ledger_task||data.profile_id?'ledger':'project')+`<div id="task-ledger-scope">${financeProfileSelect(data.profile_id)}</div>`+field('title','要做什么',data.title,'text','required maxlength="200"')+select('status','状态',['待办','进行中','已完成'],data.status||'待办')+peopleSelect('assignee_id','负责人',data.assignee_id)+field('due_date','截止日期',data.due_date,'date')+projectSelect(data.project_id)+area('description','补充说明',data.description);
  if(kind==='files')content=field('title','文件名称',data.title,'text','required')+projectSelect(data.project_id,true)+(data.storage_provider==='gcs'?'<p class="hint wide">文件已保存，可修改名称、项目和分区。原文件内容保持不变。</p>':field('url','已有文件链接',data.url,'url','required placeholder="https://drive.google.com/…"'));
  if(['notes','tasks','files','transactions'].includes(kind)) content+=sectionSelect(data.project_id,data.subsection_id);
@@ -380,7 +396,7 @@ function userEditor(id) {
 function passwordForm() {openModal('修改密码',formWrap(field('current_password','当前密码','','password','required autocomplete="current-password"')+field('password','新密码（至少 12 位）','','password','required minlength="12" maxlength="128" autocomplete="new-password"')+field('confirm_password','再次输入新密码','','password','required minlength="12" autocomplete="new-password"'),'修改并重新登录'));bindSubmit(async form=>{if(form.get('password')!==form.get('confirm_password'))throw new Error('两次输入的新密码不一致');await api('/password','POST',Object.fromEntries(form));me=null;closeModal();loginPage();toast('密码已更新，请使用新密码登录');});}
 function account() {openModal('账号与设置',`<div class="account"><span class="avatar">${initials(me.name)}</span><div>${esc(me.name)}<small>${esc(me.username)} · ${me.role==='admin'?'管理员':'团队成员'}</small></div></div><div class="panel"><button class="row clickable" data-action="password"><div class="row-main"><h3>修改密码</h3></div>${icon('arrow')}</button><button class="row clickable" data-view="activity"><div class="row-main"><h3>操作记录</h3></div>${icon('arrow')}</button>${me.role==='admin'?'<button class="row clickable" data-view="users"><div class="row-main"><h3>平台账号管理</h3></div>'+icon('arrow')+'</button>':''}<button class="row clickable" data-view="security"><div class="row-main"><h3>账号安全与维护记录</h3></div>${icon('arrow')}</button><button class="row clickable" data-action="refresh"><div class="row-main"><h3>刷新全部记录</h3></div>${icon('refresh')}</button><button class="row clickable" data-action="logout"><div class="row-main"><h3>退出登录</h3></div>${icon('logout')}</button></div><p class="hint">手机安装：iPhone Safari → 分享 → 添加到主屏幕；Android Chrome → 菜单 → 安装应用。使用时需要网络连接。</p>`);}
 const fieldLabels={source_import:'导入来源',subsection_id:'分区',linked_task_id:'关联待办',title:'标题',name:'姓名',date:'日期',event:'事件',amount:'原币金额',usd_amount:'美元折算金额',currency:'币种',direction:'收支',payment_status:'支付状态',posting_status:'入账状态',booked_amount:'入账金额',payment_method:'付款形式',responsible:'负责人',category:'类别',note:'备注',description:'说明',body:'正文',contact:'联系人',status:'状态',progress:'进度',due_date:'截止日',project_id:'项目',owner_id:'负责人',assignee_id:'负责人',username:'账号',role:'角色',active:'启用',must_change:'需改密码',url:'链接'};
-function auditText(data) {if(!data)return '无';return Object.entries(data).filter(([k])=>!['id','workspace_id','version','updated_at','upload_note_id','upload_sha256','drive_file_id','storage_provider','storage_bucket','storage_object','storage_generation','mime_type','size','filename'].includes(k)).map(([k,v])=>`${fieldLabels[k]||k}：${k==='resource_kind'?(kindLabels[v]||v):k==='resource_id'?(data.resource_kind==='finance_profiles'?financeProfileName(v):projectName(v)):k==='user_id'?person(v):k==='role'?accessName(v):k==='ledger_task'?(v?'是':'否'):k==='source_import'?sourceLabel(v):k==='warehouse_id'?warehouseName(v):k==='product_id'?productName(v):k==='linked_transaction_id'?(find(v)?.title||'未关联'):k==='profile_id'?financeProfileName(v):k==='project_id'?projectName(v):k==='subsection_id'?sectionName(v):k==='linked_task_id'?(find(v)?.title||'未关联'):k==='attachment_ids'?(v.map(id=>find(id)?.title||'历史附件').join('、')||'无'):['owner_id','assignee_id','deleted_by'].includes(k)?person(v):v??'未填写'}`).join('\n');}
+function auditText(data) {if(!data)return '无';return Object.entries(data).filter(([k])=>!['id','workspace_id','version','updated_at','link_note_id','upload_note_id','upload_sha256','drive_file_id','storage_provider','storage_bucket','storage_object','storage_generation','mime_type','size','filename'].includes(k)).map(([k,v])=>`${fieldLabels[k]||k}：${k==='resource_kind'?(kindLabels[v]||v):k==='resource_id'?(data.resource_kind==='finance_profiles'?financeProfileName(v):projectName(v)):k==='user_id'?person(v):k==='role'?accessName(v):k==='ledger_task'?(v?'是':'否'):k==='source_import'?sourceLabel(v):k==='warehouse_id'?warehouseName(v):k==='product_id'?productName(v):k==='linked_transaction_id'?(find(v)?.title||'未关联'):k==='profile_id'?financeProfileName(v):k==='project_id'?projectName(v):k==='subsection_id'?sectionName(v):k==='linked_task_id'?(find(v)?.title||'未关联'):k==='attachment_ids'?(v.map(id=>find(id)?.title||'历史附件').join('、')||'无'):['owner_id','assignee_id','deleted_by'].includes(k)?person(v):v??'未填写'}`).join('\n');}
 fieldLabels.show_on_timeline='加入时间线';fieldLabels.attachment_ids='关联附件';
 Object.assign(fieldLabels,{resource_kind:'权限类型',resource_id:'权限对象',user_id:'成员',ledger_task:'账本待办'});
 Object.assign(fieldLabels,{deleted_at:'删除时间',deleted_by:'删除人',_project_deleted:'项目已删除',_project_title:'原项目名称'});
@@ -410,10 +426,48 @@ async function downloadFile(id,button){
  finally{button.disabled=false;}
 }
 function uploadNoteSelect(project) {return select('note_id','关联沟通与进展（可选）',[['','不关联沟通记录'],...byKind('notes').filter(n=>n.project_id===project).map(n=>[n.id,n.title])],'');}
+function attachmentSourceTabs(active) {
+ return `<nav class="detail-tabs attachment-source-tabs" aria-label="添加附件方式">${config.upload_ready?`<button type="button" data-action="upload-form" class="${active==='upload'?'active':''}" aria-pressed="${active==='upload'}">上传文件</button>`:''}<button type="button" data-action="file-link-form" class="${active==='drive'?'active':''}" aria-pressed="${active==='drive'}">Google Drive 链接</button></nav>`;
+}
+function driveLinkForm() {
+ if(!canCreate('files')){toast('没有此项目的编辑权限');return;}
+ const targetWorkspace=workspaceId,creationKey=crypto.randomUUID();let pending=null;
+ openModal('添加项目附件',attachmentSourceTabs('drive')+formWrap(field('url','Google Drive 分享链接','','url','required maxlength="2000" placeholder="https://drive.google.com/…"')+field('title','显示名称（可选）','','text','maxlength="200" placeholder="例如：公司介绍、产品视频"')+projectSelect(projectId||'',true)+sectionSelect(projectId||'',subsectionId==='unassigned'?'':subsectionId)+`<div id="upload-note-field" class="wide">${uploadNoteSelect(projectId||'')}</div><div class="wide" id="drive-link-preview"></div><p class="hint wide">支持文件、文件夹和 Google 文档。链接没有 20 MB 限制，点击后在新标签页打开；请在 Google Drive 中给需要查看的人共享权限。</p>`,'保存链接'));
+ const form=$('#editor');
+ form.addEventListener('input',()=>{
+  const link=CmpDriveLinks.parse(form.elements.url.value.trim());
+  $('#drive-link-preview').innerHTML=link?driveLinkCard({...link,title:form.elements.title.value.trim()||link.title}):'';
+ });
+ form.addEventListener('change',event=>{
+  if(event.target.name==='note_id'){
+   const note=find(event.target.value),section=form.elements.subsection_id;
+   if(note)section.value=note.subsection_id||'';section.disabled=Boolean(note);
+  }
+ });
+ bindSubmit(async values=>{
+  if(workspaceId!==targetWorkspace)throw new Error('当前空间已变化，请重新打开添加窗口');
+  if(!pending){
+   const link=CmpDriveLinks.parse(values.get('url').trim());
+   if(!link)throw new Error('请粘贴 Google Drive 文件、文件夹或 Google 文档的完整分享链接');
+   const note=find(values.get('note_id'));
+   pending={...Object.fromEntries(values),url:link.url,title:values.get('title').trim()||link.title,subsection_id:note?note.subsection_id||'':values.get('subsection_id'),creation_key:creationKey};
+  }
+  try{await api('/records/files','POST',pending);}
+  catch(error){
+   if(error.status>=400&&error.status<500)pending=null;
+   for(const control of form.querySelectorAll('input,select'))control.disabled=Boolean(pending);
+   for(const button of $('#modal').querySelectorAll('.attachment-source-tabs button'))button.disabled=Boolean(pending);
+   $('[type=submit]',form).textContent=pending?'重试保存链接':'保存链接';
+   if(pending)throw new Error('保存结果暂未确认，请点击“重试保存链接”核对，避免重复添加。');
+   throw error;
+  }
+  closeModal();await load();toast('Google Drive 链接已保存');
+ });
+}
 function uploadForm() {
  const uploadKey=crypto.randomUUID(),targetWorkspace=workspaceId;
  if(!canCreate('files')){toast('没有此项目的编辑权限');return;}
- openModal('上传项目附件',formWrap(projectSelect(projectId||'',true)+sectionSelect(projectId||'',subsectionId==='unassigned'?'':subsectionId)+`<div id="upload-note-field" class="wide">${uploadNoteSelect(projectId||'')}</div>`+field('file','文件（最大 20 MB）','','file','required'),'上传附件')+'<p><button class="text-button" data-action="file-link-form">添加已有文件链接</button></p>');
+ openModal('添加项目附件',attachmentSourceTabs('upload')+formWrap(projectSelect(projectId||'',true)+sectionSelect(projectId||'',subsectionId==='unassigned'?'':subsectionId)+`<div id="upload-note-field" class="wide">${uploadNoteSelect(projectId||'')}</div>`+field('file','文件（最大 20 MB）','','file','required'),'上传附件')+'<p class="hint">超过 20 MB？先上传到 Google Drive，再切换到“Google Drive 链接”粘贴分享链接。</p>');
  $('#editor').addEventListener('change',event=>{
   if(event.target.name==='note_id'){
    const note=find(event.target.value),section=$('[name=subsection_id]',$('#editor'));
@@ -422,7 +476,7 @@ function uploadForm() {
  });
  bindSubmit(async form=>{
   if(workspaceId!==targetWorkspace)throw new Error('当前空间已变化，请重新打开上传窗口');
-  if(form.get('file').size>20*1024*1024)throw new Error('文件不能超过 20 MB');
+  if(form.get('file').size>20*1024*1024)throw new Error('文件超过 20 MB，请切换到“Google Drive 链接”添加分享链接');
   const note=find(form.get('note_id'));if(note)form.set('subsection_id',note.subsection_id||'');
   form.set('upload_key',uploadKey);await api('/upload','POST',form);closeModal();await load();toast('附件已上传'+(note?'并关联沟通记录':'，可以直接预览'));
  });
@@ -432,6 +486,7 @@ function forcePassword() {$('#root').innerHTML='<div class="loading">首次登�
 function startRefresh() {clearInterval(refreshTimer);refreshTimer=setInterval(()=>{if(me&&!document.hidden&&!$('#modal').open&&!search)(maintenanceId?checkMaintenanceAccess():load()).catch(()=>{});},30000);}
 document.addEventListener('click',async e=>{
  const b=e.target.closest('button');if(!b)return;
+ if(b.closest('.attachment-source-tabs')&&b.classList.contains('active'))return;
  try {
   if((b.dataset.toggleTask&&!canEdit(b.dataset.toggleTask))||((b.dataset.stockIn||b.dataset.stockOut)&&!canCreate('stock_movements'))){toast('当前空间为只读权限');return;}
   if(b.dataset.view){view=b.dataset.view;projectId=null;subsectionId='';search='';filter='';closeModal();draw();window.scrollTo(0,0);}
