@@ -1,6 +1,6 @@
 # Company Manager · 公司工作台
 
-Kevin 与 5 位成员共用的手机优先公司管理应用。支持财务流水、项目进度、客户沟通笔记、待办、Google Drive 附件及逐条修改历史。
+Kevin 与 5 位成员共用的手机优先公司管理应用。支持财务流水、项目进度、客户沟通笔记、待办、私有附件与在线预览及逐条修改历史。
 
 - 每个账号有独立个人空间，可记录自己的项目、待办、财务和库存。登录后优先进入已加入的公司；顶部可切换公司或个人空间。
 - 公司 Owner / Admin 可管理该公司的所有项目、账本、成员和权限；普通成员只看到单独分配给自己的项目与账本。每个项目、账本可以分别授予 Viewer（只读）或 Editor（可编辑），加入公司本身不会获得业务内容权限。公司 1 的 Admin 不会自动拥有公司 2 的权限。
@@ -59,7 +59,7 @@ Cloud Run + Cloud SQL PostgreSQL + Secret Manager。生产没有 `DATABASE_URL` 
 ```bash
 export GCP_PROJECT=your-project
 export CLOUD_SQL_INSTANCE=your-project:us-central1:your-instance
-export DRIVE_FOLDER_ID=your-google-drive-folder
+export ATTACHMENT_BUCKET=your-private-gcs-bucket
 ./scripts/deploy.sh
 ```
 
@@ -67,27 +67,26 @@ export DRIVE_FOLDER_ID=your-google-drive-folder
 
 首次升级自动为旧实体和日志加入 `workspace_id`，创建团队与每个用户的个人空间；不会重写业务内容、版本、密码或历史署名。账号安全日志与团队日志分离。迁移有持久化标记，重启不会把已移出的成员重新加入团队。生产的 entities/audit 表强制启用空间行级隔离（FORCE RLS），应用逐次校验公司角色与资源授权；旧版本连接没有新版权限上下文时不可读取业务记录和日志，避免发布切换期间绕过项目/账本权限。升级需使用表所有者运行迁移，并在发布前备份该数据库。
 
-## Google Drive 上传
+## 附件存储与预览
 
-直接上传需要用户 OAuth 授权。个人 My Drive 文件夹不能靠服务账号拥有新文件。配置三个环境变量，敏感值使用 Secret Manager：
+新附件存入 Google Cloud Storage 私有 bucket。Cloud Run 通过专属运行服务账号和 Application Default Credentials 访问，不需要个人 Google Drive OAuth、客户端密钥或 refresh token。
 
-- `GOOGLE_CLIENT_ID`
-- `GOOGLE_CLIENT_SECRET`
-- `GOOGLE_REFRESH_TOKEN`（拥有目标文件夹上传权限的用户，授权包含 Drive scope）
+- 配置 `ATTACHMENT_BUCKET`。bucket 使用与 Cloud Run 相同区域、Uniform bucket-level access、Public access prevention 和 7 天 soft delete。
+- 仅向运行服务账号授予该 bucket 的 `roles/storage.objectCreator`、`roles/storage.objectViewer`；不开放公共读取，不发放长期服务账号密钥。
+- 公司项目和个人空间沿用原有权限。附件内容通过 `/api/files/{id}/content` 返回，每次读取检查登录、工作空间、当前项目权限，网络读取后再次核对。个人维护读取仍须有效的限时维护授权并记录审计。
+- 新建项目可选择最多 10 个附件，每个最大 20 MB。先保存项目和成员权限，再逐个上传；失败可重试。关闭页面后需重新选择未完成文件。
+- `creation_key` 保证重复创建返回同一项目。附件使用工作空间隔离的确定性对象名、内容 SHA-256 和 GCS `if_generation_match=0` 创建前置条件，重试核对已有对象；记录与上传审计在同一 PostgreSQL 事务提交。GCS 对象和数据库不共用事务，数据库失败留下的对象可通过相同上传请求恢复关联。不会覆盖已有对象。
+- PDF 使用随应用发布的 Mozilla PDF.js 在浏览器内渲染，可翻页和缩放；PNG、JPEG、GIF、WebP 和 UTF-8 文本直接预览。其他格式和加密 PDF 可下载。不会发送文件给第三方在线预览服务。内容不写入浏览器持久缓存。
+- 后端根据文件内容识别预览类型；HTML、SVG 等主动内容只作为下载文件。对象版本、路径、大小和摘要仅由服务端填写，编辑记录不能更改这些字段。预览、下载也核对内容摘要。
+- 已有 Google Drive / Docs 链接继续保留，点击后在原网站打开，仍由原网站管理访问权限。新上传不再使用 Google Drive。
 
-新建项目时可以选择最多 10 个附件，每个最大 20 MB。保存后先创建项目及成员权限，再逐个上传到 `DRIVE_FOLDER_ID`，记录项目 ID、上传人及 Drive 链接，最后打开项目附件列表。失败时保留项目、成功附件和仍在页面中的待上传文件，可单独重试。关闭或刷新页面后，需要重新选择尚未完成的文件。
-
-创建请求使用同一个 `creation_key` 重试时返回已创建的项目，不重复写入项目或成员授权。附件使用 `upload_key` 和内容摘要核对数据库及 Drive 中的已有文件；重复请求在 PostgreSQL 中按附件串行处理，业务记录与审计同事务提交。上传结束后重新核对登录和项目权限。
-
-没有授权时明确显示“尚未连接”，支持先记录现有 Drive 文件链接。上传不会更改文件或文件夹的共享权限，因此访问链接仍须相应的 Google Drive 权限。
-
-当前版本没有在线 OAuth 配置向导。管理员需要创建 Google OAuth 客户端并提供 refresh token，或者由运维人员帮助完成首次授权。聊天中的 Drive 连接不能直接作为部署应用的长期凭据。
+PDF.js 版本及许可证位于 `static/vendor/pdfjs/`，包含中文 CMaps、标准字体和图像解码依赖。升级时从官方 `pdfjs-dist` 包整体更新并重测手机预览。
 
 ## 已知边界
 
 - 原 Google Sheet 作为字段参考和原表入口，不自动同步或写回。经明确授权后，可用下面的管理脚本导入已核对的流水快照。
 - 财务汇总与累计按原币分别计算当前筛选的流水，含未付记录，不代表银行余额。美元折算金额保留在明细列中，不自动混入其他币种的汇总。待确认的旧流水不计入待报销余额。
-- 第一版不做离线写入、原生 App Store 打包、附件预览代理或自动给成员共享 Drive 文件。
+- 第一版不做离线写入、原生 App Store 打包、Office 文件转换预览或自动给成员共享外部 Drive 文件。
 - 无业务记录硬删除，项目用暂停或已完成状态管理。操作日志只通过服务接口追加；数据库管理人员仍具有数据库层面的管理能力。
 - 状态接口一次返回全部业务记录；当前针对 6 人小团队。数据规模扩大后应增加分页和归档查询。
 - 商品和仓库档案作为项目成员共享的参考目录，由公司 Admin 管理。出入库流水按项目授权，普通成员看到的汇总仅为已授权项目净变动，不代表公司全仓库存；全仓库存校验只在服务器内部执行。

@@ -12,10 +12,13 @@ from contextlib import contextmanager, asynccontextmanager
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 from zoneinfo import ZoneInfo
 
 import requests
+import attachment_storage
+from google.api_core.exceptions import GoogleAPIError, NotFound
+from google.auth.exceptions import GoogleAuthError
 from fastapi import FastAPI, Request, Response, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -24,6 +27,8 @@ ROOT = Path(__file__).parent
 PRODUCTION = bool(os.getenv('K_SERVICE'))
 DATABASE_URL = os.getenv('DATABASE_URL', '')
 DRIVE_FOLDER = os.getenv('DRIVE_FOLDER_ID', '1N58QFJPdxpIjsdzZaUIn2tm39_yp4wD2')
+STORAGE_BUCKET = os.getenv('ATTACHMENT_BUCKET', '')
+STORED_FILE_FIELDS = ('storage_provider', 'storage_bucket', 'storage_object', 'storage_generation', 'upload_sha256', 'mime_type', 'size', 'filename')
 SHEET_URL = 'https://docs.google.com/spreadsheets/d/1R9hbqZftVj6BWH82d2l-RVYMUzz6XTed6LEFcibKWWU/edit'
 FINANCE_MEMBERS = os.getenv('FINANCE_MEMBERS', 'true').lower() == 'true'
 COMPANY_SPACE = 'company'
@@ -347,7 +352,8 @@ async def security(request, call_next):
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['Referrer-Policy'] = 'same-origin'
     response.headers['X-Frame-Options'] = 'DENY'
-    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+    if 'Content-Security-Policy' not in response.headers:
+        response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; font-src 'self' blob:; worker-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
     if request.url.path.startswith('/api/'): response.headers['Cache-Control'] = 'no-store'
     if PRODUCTION: response.headers['Strict-Transport-Security'] = 'max-age=31536000'
     return response
@@ -732,7 +738,7 @@ def check_stock_balance(c, data, exclude_id=None):
                 fail(f'库存不足：这次操作会使 {day} 的库存低于零，请核对入库和出库记录' if c.access is None or c.access['full'] else '库存不足，请联系公司 Admin 核对仓库库存')
 
 
-def validate(kind, data, c):
+def validate(kind, data, c, uploaded=False):
     if kind == 'warehouses':
         out = {'title': text_field(data, 'title', 120, True), 'description': text_field(data, 'description', 2000)}
     elif kind == 'products':
@@ -791,9 +797,16 @@ def validate(kind, data, c):
         if out['ledger_task'] and out['project_id']: fail('待办请选择项目或账本作为归属，不可同时选择')
         if out['profile_id'] and not c.records("id=? AND kind='finance_profiles'", (out['profile_id'],), columns='id').fetchone(): fail('财务账本不存在或无权访问')
     elif kind == 'files':
-        url = text_field(data, 'url', 2000, True)
-        parsed = urlparse(url)
-        if parsed.scheme != 'https' or parsed.hostname not in ('drive.google.com', 'docs.google.com'): fail('请使用 Google Drive 或 Google Docs 的 HTTPS 链接')
+        previous = getattr(c, 'existing', (None, {}))[1]
+        if previous.get('storage_provider') == 'gcs':
+            url = previous['url']
+            if data.get('url', url) != url: fail('已上传附件不能替换为其他链接，请另行上传文件')
+        elif uploaded:
+            url = ''
+        else:
+            url = text_field(data, 'url', 2000, True)
+            parsed = urlparse(url)
+            if parsed.scheme != 'https' or parsed.hostname not in ('drive.google.com', 'docs.google.com'): fail('请使用 Google Drive 或 Google Docs 的 HTTPS 链接')
         out = {'title': text_field(data, 'title', 200, True), 'url': url, 'project_id': text_field(data, 'project_id', 80, True)}
     else: fail('记录类型无效', 404)
     if out.get('project_id') and not reference_record(c, 'project_id', out['project_id'], 'projects'): fail('关联项目不存在')
@@ -929,7 +942,8 @@ def state(request: Request):
         'full_access': access['full'], 'full_edit': full_edit,
         'project_access': access['projects'], 'ledger_access': access['finance_profiles'],
         'can_manage_team': admin, 'can_manage_resources': admin,
-        'drive_upload_ready': team and workspace['id'] == COMPANY_SPACE and (full_edit or 'editor' in access['projects'].values()) and all(os.getenv(k) for k in ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN']),
+        'upload_ready': bool(STORAGE_BUCKET) and (full_edit or 'editor' in access['projects'].values()),
+        'drive_upload_ready': False,
         'drive_folder_url': 'https://drive.google.com/drive/folders/' + DRIVE_FOLDER if admin and workspace['id'] == COMPANY_SPACE else None,
         'sheet_url': SHEET_URL if admin and workspace['id'] == COMPANY_SPACE and finance else None}}
 
@@ -979,8 +993,7 @@ def create_record(kind: str, body: dict, request: Request):
             existing = c.records('id=? AND kind=?', (item_id, kind)).fetchone()
             if existing: return present_record(c, existing)
         if kind == 'projects' and body.get('with_attachments'):
-            require_drive_workspace(c.workspace_id)
-            drive_credentials()
+            require_storage()
         data = prepare_record(c, kind, body, user)
         if kind == 'products': check_product(c, data)
         if kind == 'stock_movements': check_stock_balance(c, data)
@@ -1005,7 +1018,7 @@ def update_record(kind: str, item_id: str, body: dict, request: Request):
         c.existing = (kind, before)
         data = prepare_record(c, kind, {**before, **body}, user)
         if kind == 'files':
-            for key in ('drive_file_id', 'upload_sha256'):
+            for key in ('drive_file_id', *STORED_FILE_FIELDS):
                 if key in before: data[key] = before[key]
         authorize_record(c, kind, data, item_id, write=True)
         if kind == 'products': check_product(c, data, item_id, before)
@@ -1035,84 +1048,93 @@ def request_record_id(workspace, actor, resource, key):
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f'cmpmanager:{workspace}:{actor}:{resource}:{key}'))
 
 
-def require_drive_workspace(workspace_id):
-    if workspace_id != COMPANY_SPACE:
-        fail('此空间未配置专属 Drive 上传，请添加自己有权限的文件链接', 403)
-
-
-def drive_credentials():
-    creds = [os.getenv(k) for k in ('GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN')]
-    if not all(creds): fail('管理员尚未连接 Google Drive。可先添加已有文件链接。', 503)
-    return creds
+def require_storage():
+    if not STORAGE_BUCKET: fail('附件存储尚未配置，请联系管理员', 503)
 
 
 @app.post('/api/upload')
 def upload(request: Request, project_id: str = Form(...), file: UploadFile = File(...), subsection_id: str = Form(''), upload_key: str = Form('')):
     user = current_user(request)
+    fields = {'title': '附件', 'project_id': project_id, 'subsection_id': subsection_id}
     with db() as c:
-        workspace = scope_request(c, request, user, write=True)
-        require_drive_workspace(workspace['id'])
-        authorize_record(c, 'files', {'project_id': project_id}, write=True, creating=True)
-        validate('files', {'title': '附件', 'url': 'https://drive.google.com/', 'project_id': project_id, 'subsection_id': subsection_id}, c)
-    creds = drive_credentials()
-    content = file.file.read(20 * 1024 * 1024 + 1)
-    if len(content) > 20 * 1024 * 1024: fail('文件不能超过 20 MB', 413)
-    title = Path((file.filename or '附件').replace('\\', '/')).name[:200] or '附件'
+        scope_request(c, request, user, write=True)
+        authorize_record(c, 'files', fields, write=True, creating=True)
+        validate('files', fields, c, uploaded=True)
+    require_storage()
+    content = file.file.read(attachment_storage.MAX_BYTES + 1)
+    if len(content) > attachment_storage.MAX_BYTES: fail('文件不能超过 20 MB', 413)
+    if not content: fail('不能上传空文件')
+    filename = Path((file.filename or '附件').replace(chr(92), '/')).name[:200] or '附件'
+    filename = ''.join(ch for ch in filename if ord(ch) >= 32 and ord(ch) != 127) or '附件'
+    fields['title'] = filename
     digest = hashlib.sha256(content).hexdigest()
+    mime = attachment_storage.content_type(filename, content)
     with db() as c:
         scope_request(c, request, user, write=True)
         item_id = request_record_id(c.workspace_id, user['id'], 'files:' + project_id, upload_key) if upload_key else uid()
-        # Serialize retries of this attachment without blocking all company edits
-        # while Google receives the file. The final record and audit commit together.
         if DATABASE_URL:
             c.execute('SELECT pg_advisory_xact_lock(?)', (int.from_bytes(hashlib.sha256(item_id.encode()).digest()[:8], 'big', signed=True),))
         user = current_user(request, connection=c)
         scope_request(c, request, user, write=True)
-        authorize_record(c, 'files', {'project_id': project_id}, write=True, creating=True)
+        authorize_record(c, 'files', fields, write=True, creating=True)
         existing = c.records("id=? AND kind='files'", (item_id,)).fetchone()
         if existing:
             previous = json.loads(existing['data'])
             if previous.get('upload_sha256') != digest or previous.get('project_id') != project_id or previous.get('subsection_id', '') != subsection_id:
                 fail('此附件已保存或移动，请刷新项目后检查', 409)
             return present_record(c, existing)
+        name = attachment_storage.object_name(c.workspace_id, item_id)
         try:
-            token = requests.post('https://oauth2.googleapis.com/token', data={'client_id': creds[0], 'client_secret': creds[1], 'refresh_token': creds[2], 'grant_type': 'refresh_token'}, timeout=30)
-            token.raise_for_status()
-            headers = {'Authorization': 'Bearer ' + token.json()['access_token']}
-            remote = None
-            if upload_key:
-                # Reconcile a previous upload whose response or DB commit was lost.
-                found = requests.get('https://www.googleapis.com/drive/v3/files', params={'q': "trashed=false and appProperties has { key='cmpUploadId' and value='" + item_id + "' }", 'fields': 'files(id,webViewLink,appProperties,parents)', 'pageSize': 2}, headers=headers, timeout=30)
-                found.raise_for_status()
-                matches = found.json().get('files', [])
-                if matches:
-                    if len(matches) != 1 or matches[0].get('appProperties', {}).get('cmpSha256') != digest or DRIVE_FOLDER not in matches[0].get('parents', []):
-                        fail('Drive 中已有不同内容的附件，请刷新项目后检查', 409)
-                    remote = matches[0]
-            if remote is None:
-                boundary = 'cmp_' + secrets.token_hex(24)
-                metadata = json.dumps({'name': title, 'parents': [DRIVE_FOLDER], 'appProperties': {'cmpProjectId': project_id, 'cmpUserId': user['id'], 'cmpUploadId': item_id, 'cmpSha256': digest}}).encode()
-                mime = file.content_type or 'application/octet-stream'
-                if not re.fullmatch(r'[a-zA-Z0-9.+-]+/[a-zA-Z0-9.+-]+', mime): mime = 'application/octet-stream'
-                payload = (f'--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n'.encode() + metadata
-                           + f'\r\n--{boundary}\r\nContent-Type: {mime}\r\n\r\n'.encode() + content
-                           + f'\r\n--{boundary}--\r\n'.encode())
-                result = requests.post('https://www.googleapis.com/upload/drive/v3/files', params={'uploadType': 'multipart', 'fields': 'id,webViewLink'}, headers={**headers, 'Content-Type': 'multipart/related; boundary=' + boundary}, data=payload, timeout=120)
-                result.raise_for_status()
-                remote = result.json()
-            remote_id = remote['id']
-            if not re.fullmatch(r'[a-zA-Z0-9_-]+', remote_id): raise ValueError('Invalid Drive ID')
-        except (requests.RequestException, ValueError, KeyError, TypeError):
-            fail('Google Drive 上传未完成，请重试；已保存的附件会自动核对。', 502)
-        # Recheck the session, project membership and subsection after network I/O.
+            stored = attachment_storage.store(STORAGE_BUCKET, name, content, mime, digest)
+        except attachment_storage.ObjectConflict:
+            fail('已有附件与本次内容不同，请重新选择文件', 409)
+        except (GoogleAPIError, GoogleAuthError, requests.RequestException, ValueError, KeyError, TypeError):
+            fail('附件上传未完成，请重试；已保存的附件会自动核对。', 502)
         lock_records(c)
         user = current_user(request, connection=c)
         scope_request(c, request, user, write=True)
-        authorize_record(c, 'files', {'project_id': project_id}, write=True, creating=True)
-        data = validate('files', {'title': title, 'url': 'https://drive.google.com/file/d/' + remote_id + '/view', 'project_id': project_id, 'subsection_id': subsection_id}, c)
-        data.update(drive_file_id=remote_id, upload_sha256=digest)
+        authorize_record(c, 'files', fields, write=True, creating=True)
+        data = validate('files', fields, c, uploaded=True)
+        data.update(stored, filename=filename, url='/api/files/' + item_id + '/content')
         insert_record(c, 'files', data, user['id'], item_id=item_id)
         return present_record(c, c.records('id=?', (item_id,)).fetchone())
+
+
+def authorized_file(c, request, user, item_id):
+    scope_request(c, request, user)
+    row = c.records("id=? AND kind='files'", (item_id,)).fetchone()
+    if not row: fail('附件不存在或无权访问', 404)
+    info = json.loads(row['data'])
+    if info.get('storage_provider') != 'gcs': fail('这是外部文件链接，请在原网站打开', 400)
+    if info.get('storage_bucket') != STORAGE_BUCKET or info.get('storage_object') != attachment_storage.object_name(c.workspace_id, item_id):
+        fail('附件存储信息无效', 409)
+    return info
+
+
+@app.get('/api/files/{item_id}/content')
+def file_content(item_id: str, request: Request, download: bool = False):
+    user = current_user(request)
+    with db() as c:
+        info = authorized_file(c, request, user, item_id)
+    try:
+        content = attachment_storage.read(info)
+    except NotFound:
+        fail('附件文件不存在，请联系管理员', 404)
+    except (GoogleAPIError, GoogleAuthError, requests.RequestException, attachment_storage.ObjectConflict, ValueError, KeyError, TypeError):
+        fail('暂时无法读取附件，请稍后重试', 502)
+    # Revocations, workspace changes and moved records also apply during I/O.
+    with db() as c:
+        user = current_user(request, connection=c)
+        current = authorized_file(c, request, user, item_id)
+        if any(current.get(k) != info.get(k) for k in STORED_FILE_FIELDS): fail('附件已更新，请重新打开', 409)
+    mime = attachment_storage.content_type(info['filename'], content)
+    disposition = 'attachment' if download or mime == 'application/octet-stream' else 'inline'
+    return Response(content, media_type='application/octet-stream' if download else mime, headers={
+        'Content-Disposition': disposition + "; filename=attachment; filename*=UTF-8''" + quote(info['filename'], safe=''),
+        'Content-Security-Policy': "sandbox; default-src 'none'; frame-ancestors 'none'",
+        'Vary': 'Cookie, X-Cmp-Workspace, X-Cmp-Maintenance',
+        'Cache-Control': 'private, no-store',
+    })
 
 
 app.mount('/static', StaticFiles(directory=ROOT / 'static'), name='static')

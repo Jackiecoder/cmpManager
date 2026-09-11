@@ -22,21 +22,16 @@ def test_postgres_upload_retries_and_mid_upload_revocation(monkeypatch):
     monkeypatch.setattr(app, 'DATABASE_URL', make_conninfo(**args))
     monkeypatch.setattr(app, 'PRODUCTION', False)
     monkeypatch.setenv('ADMIN_INITIAL_PASSWORD','synthetic-owner-password!')
-    for key in ('GOOGLE_CLIENT_ID','GOOGLE_CLIENT_SECRET','GOOGLE_REFRESH_TOKEN'): monkeypatch.setenv(key,'synthetic-only')
-    uploads=[]; revoke=None
-    class Reply:
-        def __init__(self,data): self.data=data
-        def json(self): return self.data
-        def raise_for_status(self): pass
-    def post(url, **kwargs):
-        if 'oauth2' in url:return Reply({'access_token':'synthetic'})
-        uploads.append(kwargs)
+    from storage_fakes import CloudStore
+    cloud=CloudStore();revoke=None
+    monkeypatch.setattr(app,'STORAGE_BUCKET','synthetic-attachments')
+    monkeypatch.setattr(app.attachment_storage.storage,'Client',lambda:cloud)
+    def after_upload():
         if revoke:
             with psycopg.connect(**args) as c:
                 c.execute("UPDATE resource_access SET role='removed',version=version+1 WHERE user_id=%s AND resource_id=%s", revoke)
-        return Reply({'id':'synthetic-'+str(len(uploads))})
-    monkeypatch.setattr(app.requests,'post',post)
-    monkeypatch.setattr(app.requests,'get',lambda *a,**k:Reply({'files':[]}))
+    cloud.on_upload=after_upload
+
     try:
         with TestClient(app.app,headers={'X-Cmp-Request':'1'}) as client:
             client.post('/api/login',json={'username':'kevin','password':'synthetic-owner-password!'})
@@ -51,7 +46,7 @@ def test_postgres_upload_retries_and_mid_upload_revocation(monkeypatch):
             with ThreadPoolExecutor(max_workers=2) as pool:
                 responses=list(pool.map(lambda _: upload(),range(2)))
             assert all(r.status_code==200 for r in responses),[r.text for r in responses]
-            assert responses[0].json()['id']==responses[1].json()['id'] and len(uploads)==1
+            assert responses[0].json()['id']==responses[1].json()['id'] and len(cloud.uploads)==1
             assert len(client.get('/api/activity?entity_id='+responses[0].json()['id']).json())==1
             member=client.post('/api/users',json={'name':'Chloe','username':'chloe','password':'synthetic-member-password!','team_role':'member'}).json()
             assert client.patch('/api/resource-access/projects/'+project['id'],json={'members':[{'user_id':member['id'],'role':'editor','version':0}]}).status_code==200

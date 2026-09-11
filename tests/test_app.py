@@ -122,26 +122,16 @@ def test_finance_permission_enforced_on_all_endpoints(client,monkeypatch):
     assert client.patch('/api/records/finance_profiles/'+profile['id'],json={'version':1,'title':'forged'}).status_code==403
     assert all(x['kind'] not in ('transactions','finance_profiles') for x in client.get('/api/activity').json())
 
-def test_upload_multipart_and_audit(client,monkeypatch):
+def test_upload_object_and_audit(client,monkeypatch):
     ready(client);p=project(client)
-    for key in ('GOOGLE_CLIENT_ID','GOOGLE_CLIENT_SECRET','GOOGLE_REFRESH_TOKEN'):monkeypatch.setenv(key,'test-only')
     import app
-    class Reply:
-        def __init__(self,data):self.data=data
-        def raise_for_status(self):pass
-        def json(self):return self.data
-    calls=[]
-    def post(url,**kwargs):
-        calls.append((url,kwargs))
-        if 'oauth2' in url:return Reply({'access_token':'test-token'})
-        assert kwargs['headers']['Content-Type'].startswith('multipart/related; boundary=')
-        assert p['id'].encode() in kwargs['data']
-        assert app.DRIVE_FOLDER.encode() in kwargs['data']
-        assert b'%PDF-test' in kwargs['data']
-        return Reply({'id':'remote-test','webViewLink':'https://drive.google.com/file/d/remote-test/view'})
-    monkeypatch.setattr(app.requests,'post',post)
+    from storage_fakes import CloudStore
+    cloud=CloudStore()
+    monkeypatch.setattr(app,'STORAGE_BUCKET','synthetic-attachments')
+    monkeypatch.setattr(app.attachment_storage.storage,'Client',lambda:cloud)
     r=client.post('/api/upload',data={'project_id':p['id']},files={'file':('sample.pdf',b'%PDF-test','application/pdf')})
     assert r.status_code==200 and r.json()['kind']=='files'
     log=client.get('/api/activity?entity_id='+r.json()['id']).json()
     assert len(log)==1 and log[0]['actor_name']=='Kevin'
-    assert len(calls)==2
+    assert len(cloud.uploads)==1
+    assert client.get(r.json()['url']).content==b'%PDF-test'

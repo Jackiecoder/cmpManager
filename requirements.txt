@@ -3,3 +3,4 @@ uvicorn==0.52.4
 psycopg[binary]==3.3.5
 python-multipart==0.0.32
 requests==2.34.2
+google-cloud-storage==3.14.1
